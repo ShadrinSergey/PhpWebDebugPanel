@@ -39,8 +39,20 @@ function dbgp_arg($v)
 {
     $enc = rawurlencode($v);
     return strtr($enc, [
-        '%2F' => '/', '%3A' => ':', '%24' => '$', '%5B' => '[', '%5D' => ']',
+        '%2F' => '/', '%3A' => ':',
+        '%24' => '$', '%5B' => '[', '%5D' => ']',
+        '%27' => "'", '%22' => '"',
         '%5F' => '_', '%2D' => '-', '%2E' => '.', '%2C' => ','
+    ]);
+}
+
+function dbgp_arg_fullname($v)
+{
+    $enc = rawurlencode($v);
+    return strtr($enc, [
+        '%24' => '$',
+        '%5B' => '[', '%5D' => ']',
+        '%27' => "'", '%22' => '"',
     ]);
 }
 
@@ -228,11 +240,19 @@ function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, 
         $txn++;
         $argStr = '';
         foreach ($args as $k => $v) {
-            $argStr .= ' -' . $k . ' ' . dbgp_arg($v);
+            if ($cmd === 'property_get' && $k === 'n') {
+                $argStr .= ' -' . $k . ' ' . dbgp_arg_fullname($v);
+            } else {
+                $argStr .= ' -' . $k . ' ' . dbgp_arg($v);
+            }
         }
         $line = $cmd . ' -i ' . $txn . $argStr;
-        if ($data !== '') $line .= ' -- ' . base64_encode($data);
         @fwrite($sock, $line . "\0");
+
+        if ($cmd === 'property_get' && isset($args['n'])) {
+            dlog('DBGp send property_get', ['n_raw' => (string)$args['n'], 'line' => $line]);
+        }
+
         $resp = dbgp_read_packet($sock, $timeout_sec);
         if ($resp !== null) {
             if (strpos($resp, '<response') === false) {
@@ -293,6 +313,66 @@ function prop_fetch($sock, SimpleXMLElement $p, $expand_children = true, $max_ch
         }
     }
     return $val;
+}
+
+function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64)
+{
+    $val = prop_scalar_or_summary($p);
+    $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
+
+    if (!$has_children) {
+        if ($val === '' && isset($p['fullname'])) {
+            $resp = dbgp_cmd_safe($sock, 'property_get', [
+                'n' => (string)$p['fullname'], 'd' => 0, 'c' => $ctx_id
+            ], '', 2.0, 1);
+            if ($resp && isset($resp->property)) {
+                $val = prop_scalar_or_summary($resp->property);
+            }
+        }
+        return $val;
+    }
+
+    $type = isset($p['type']) ? (string)$p['type'] : 'array';
+    $out = ['__type' => $type, '__children' => []];
+
+    if ($depth_left <= 0 || !isset($p['fullname'])) {
+        $n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
+        $out['__summary'] = $type . '(' . $n . ')';
+        return $out;
+    }
+
+    $resp = dbgp_cmd_safe($sock, 'property_get', [
+        'n' => (string)$p['fullname'],
+        'd' => 0,
+        'c' => $ctx_id
+    ], '', 2.0, 1);
+
+    if ($resp && isset($resp->property->property)) {
+        $i = 0;
+        foreach ($resp->property->property as $child) {
+            if ($i++ >= $max_children) break;
+            $name = isset($child['name']) ? (string)$child['name'] : '';
+            $out['__children'][$name] = prop_tree_from_property($child, $sock, $ctx_id, $depth_left - 1, $max_children);
+        }
+    } else {
+        $n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
+        $out['__summary'] = $type . '(' . $n . ')';
+    }
+
+    return $out;
+}
+
+function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64)
+{
+    $vars = [];
+    $ctx = dbgp_cmd_safe($sock, 'context_get', ['d' => 0, 'c' => $ctx_id], '', 1.2, 1);
+    if ($ctx && isset($ctx->property)) {
+        foreach ($ctx->property as $p) {
+            $name = isset($p['name']) ? (string)$p['name'] : '';
+            $vars[$name] = prop_tree_from_property($p, $sock, $ctx_id, $depth, $max_children);
+        }
+    }
+    return $vars;
 }
 
 // ---------- sockets ----------
@@ -413,7 +493,10 @@ while (true) {
 body{font:16px/1.45 system-ui;margin:24px}
 input,button{font:inherit}
 pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-height:60vh}
-#codewrap{margin-top:12px;border:1px solid #2a2a2a;border-radius:8px;overflow:hidden;background:#1e1f22}
+.code-panel{display: flex;flex-direction: row;justify-content: space-between;}
+#stack{width: 50%;position:relative;margin: 12px 0 0 0}
+#stack-body{position: absolute;height: auto;width: 100%;top: 50%;transform: translateY(-50%);}
+#codewrap{margin-top:12px;border:1px solid #2a2a2a;border-radius:8px;overflow:hidden;background:#1e1f22;flex:1;width:50%;min-height:10vh}
 #codehdr{padding:8px 12px;font:500 13px/1.4 system-ui;color:#c8ccd4;background:#2b2d30;border-bottom:1px solid #2a2a2a}
 .codepane{font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace; display:flex; max-height:60vh; overflow:auto; color:#d7dae0}
 .codepane .gutter{background:#2b2d30;color:#80868f;user-select:none;padding:8px 0}
@@ -427,13 +510,25 @@ pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-
 .codepane .tok-str{color:#ecc48d}
 .codepane .tok-num{color:#f78c6c}
 .codepane .tok-var{color:#82aaff}
+#vars{display:flex;margin-top:12px}
+.block-title{font-weight:600;margin-bottom:6px;color:#c8ccd4}
+.var-tree{font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;color:#d7dae0;background:#111;padding:8px 10px;border-radius:6px;max-height:50vh;overflow:auto;border:1px solid #2a2a2a}
+.var-kv{margin-left:0.25rem}
+.var-key{color:#82aaff}
+.var-type{color:#c792ea}
+.var-scalar{color:#e2e5e9;white-space:pre-wrap}
+.var-summary{color:#80868f}
+.var-tree > div > details { margin-left: 0.25rem; } 
+.vars-col {width: 50%}
+details { margin-left: 0.75rem }
+summary{cursor:pointer}
 </style>
 <h1>PHP Web Debug (Xdebug + DBGp)</h1>
 <p>Статус DBGp: <b id="status">…</b></p>
 <form id="bpForm" style="margin-bottom:8px">
-  <input name="file" placeholder="C:\\\\Apache24\\\\htdocs\\\\server.php" size="120" required>
+  <input id="bp-filename" name="file" placeholder="C:\\\\Apache24\\\\htdocs\\\\server.php" size="120" required>
   <input name="line" type="number" placeholder="5" min="1">
-  <button>Set breakpoint</button>
+  <button id="set-bp">Set breakpoint</button>
   <button type="button" id="btnList">List</button>
   <button type="button" id="btnClear">Clear all</button>
 </form>
@@ -443,11 +538,23 @@ pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-
   <button id="btnStepInto">Step into</button>
   <button id="btnStepOut">Step out</button>
 </p>
-<div id="codewrap">
-  <div id="codehdr"></div>
-  <div id="codeview" class="codepane"></div>
+<div class="code-panel">
+    <div id="codewrap">
+      <div id="codehdr"></div>
+      <div id="codeview" class="codepane"></div>
+    </div>
+    <pre id="stack"><div id="stack-body"></div></pre>
 </div>
-<pre id="stack"></pre>
+<div id="vars">
+  <div class="vars-col">
+    <div class="block-title">Locals</div>
+    <div id="vars-locals"></div>
+  </div>
+  <div class="vars-col">
+    <div class="block-title">Superglobals</div>
+    <div id="vars-super"></div>
+  </div>
+</div>
 <script>
 async function api(p){const r=await fetch(p);return r.json()}
 async function refresh(){
@@ -456,11 +563,18 @@ async function refresh(){
     document.getElementById('status').textContent = s.attached? ('attached / '+(s.engine_status||'unknown')) : 'waiting…';
 
     const st = await api('/dbg/api/stack');
-    document.getElementById('stack').textContent = JSON.stringify(st, null, 2);
+    const localsEl = document.getElementById('vars-locals');
+    const superEl  = document.getElementById('vars-super');
+    renderStack(st);
 
     if (st && st.status === 'break' && st.source) {
+      
+      renderVarTree(localsEl, st.locals);
+      renderVarTree(superEl,  st.superglobals);
       renderCode(st.source);
     } else {
+      localsEl.innerHTML = '';
+      superEl.innerHTML = '';
       renderCode(null);
     }
   }catch(e){
@@ -482,15 +596,51 @@ document.getElementById('btnStepOut').onclick = ()=>api('/dbg/api/step_out').the
 
 setInterval(refresh, 900); refresh();
 
+let __lastStackSig = null;
+
+function renderStack(st){
+  const el = document.getElementById('stack-body');
+  const view = (() => {
+    if (!st || typeof st !== 'object') return st;
+
+    const v = {
+      status: st.status,
+      frames: Array.isArray(st.frames) ? st.frames.slice() : undefined,
+      source: st.source
+    };
+
+    if (Array.isArray(v.frames)) {
+      v.frames.sort((a,b)=> (a.level|0) - (b.level|0));
+    }
+
+    return v;
+  })();
+
+  const sig = stableSig(view);
+  if (sig === __lastStackSig) return;
+  __lastStackSig = sig;
+
+  // рендер
+  el.textContent = JSON.stringify(view, null, 2);
+}
+let __lastRenderCodeSig = null;
 function renderCode(ctx){
   const hdr  = document.getElementById('codehdr');
   const view = document.getElementById('codeview');
   if (!ctx || !ctx.ok) {
-    hdr.textContent = '—';
+    if (hdr.textContent !== '—') {
+        hdr.textContent = '—';
+    }
     view.innerHTML = '';
     return;
   }
   
+  const sig = ctx.file + ':' + ctx.line + '|' + ctx.start + '..' + ctx.end +
+  ctx.lines.map(l => l.no + ':' + l.cur ? '*' : '' + ':' + l.text).join('/n');
+  if (sig === __lastRenderCodeSig) {
+      return;
+  }
+  __lastRenderCodeSig = sig;
   hdr.textContent = ctx.file + ':' + ctx.line + ' (lines ' + ctx.start + '..' + ctx.end + ')';
 
   const gutter = document.createElement('div');
@@ -506,7 +656,7 @@ function renderCode(ctx){
 
     const l = document.createElement('div');
     l.className = 'line' + (row.cur ? ' cur' : '');
-    l.innerHTML = row.text;
+    l.innerHTML = row.text.trim() === "" ? "&nbsp;" : row.text;
     lines.appendChild(l);
   });
 
@@ -514,6 +664,109 @@ function renderCode(ctx){
   view.appendChild(gutter);
   view.appendChild(lines);
 }
+
+function escHtml(s){return s.replace(/[&<>"']/g, m=>({ '&':'&nbsp;&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m] ).replace(/^&nbsp;/,''));}
+
+function renderVarNode(key, val, depth=0){
+  const container = document.createElement('div');
+
+  if (val === null || typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
+    const line = document.createElement('div');
+    line.className = 'var-kv';
+    line.innerHTML =
+      '<span class="var-key">'+escHtml(String(key))+'</span>' +
+      ': <span class="var-scalar">'+escHtml(String(val))+'</span>';
+    container.appendChild(line);
+    return container;
+  }
+
+  const isTree = val && typeof val === 'object' && ('__type' in val);
+  if (!isTree) {
+    const line = document.createElement('div');
+    line.className = 'var-kv';
+    line.innerHTML =
+      '<span class="var-key">'+escHtml(String(key))+'</span>' +
+      ': <span class="var-scalar">'+escHtml(JSON.stringify(val))+'</span>';
+    container.appendChild(line);
+    return container;
+  }
+
+  const type = String(val.__type || 'array');
+  const summary = ('__summary' in val) ? String(val.__summary) : (type + (val.__children ? '('+Object.keys(val.__children).length+')' : '()'));
+
+  const det = document.createElement('details');
+  if (depth <= 1) det.open = true;
+  const sum = document.createElement('summary');
+  sum.innerHTML =
+    '<span class="var-key">'+escHtml(String(key))+'</span>' +
+    ': <span class="var-type">'+escHtml(type)+'</span> ' +
+    (val.__children ? '' : '<span class="var-summary">'+escHtml(summary)+'</span>');
+  det.appendChild(sum);
+
+  if (val.__children) {
+    const keys = Object.keys(val.__children);
+    for (let i=0;i<keys.length;i++){
+      const k = keys[i];
+      const child = renderVarNode(k, val.__children[k], depth+1);
+      det.appendChild(child);
+    }
+  } else if (val.__summary) {
+    const line = document.createElement('div');
+    line.className = 'var-summary';
+    line.textContent = val.__summary;
+    det.appendChild(line);
+  }
+
+  container.appendChild(det);
+  return container;
+}
+
+function renderVarTree(rootEl, dataObj){
+  if (!dataObj || typeof dataObj !== 'object') {
+    if (rootEl.__lastSig !== 'null') {
+      rootEl.className = 'var-tree';
+      rootEl.textContent = '—';
+      rootEl.__lastSig = 'null';
+    }
+    return;
+  }
+
+  const sig = stableSig(dataObj);
+  if (rootEl.__lastSig === sig) return;
+  rootEl.__lastSig = sig;
+
+  rootEl.className = 'var-tree';
+  const frag = document.createDocumentFragment();
+
+  const names = Object.keys(dataObj).sort(); // <-- сортируем
+  for (let i = 0; i < names.length; i++) {
+    const k = names[i];
+    frag.appendChild(renderVarNode(k, dataObj[k], 0));
+  }
+  rootEl.replaceChildren(frag);
+}
+
+function stableSig(obj){
+  function norm(x){
+    if (x === null || typeof x !== 'object') return x;
+    if (Array.isArray(x)) return x.map(norm);
+    const keys = Object.keys(x).sort();
+    const y = {};
+    for (let k of keys) y[k] = norm(x[k]);
+    return y;
+  }
+  try { return JSON.stringify(norm(obj)); } catch { return String(obj); }
+}
+window.addEventListener("load", function(){
+    let setBpBtn = document.getElementById("set-bp");
+    setBpBtn.addEventListener("click", function(){
+        window.localStorage.setItem('php_debug_bp', document.getElementById('bp-filename').value);
+    });
+    
+    if (window.localStorage.getItem('php_debug_bp')) {
+        document.getElementById('bp-filename').value = window.localStorage.getItem('php_debug_bp');
+    }
+});
 </script>
 HTML;
                     http_reply($conn, 200, $html, 'text/html; charset=utf-8');
@@ -666,20 +919,8 @@ HTML;
                     }
 
                     // Take snapshot.
-                    $locals = [];
-                    $super = [];
-
-                    $ctx0 = dbgp_cmd_safe($dbg, 'context_get', ['d' => 0, 'c' => 0], '', 1.0, 1);
-                    if ($ctx0) foreach ($ctx0->property as $p) {
-                        $name = isset($p['name']) ? (string)$p['name'] : '';
-                        $locals[$name] = prop_fetch($dbg, $p, true, 64, 0);
-                    }
-
-                    $ctx1 = dbgp_cmd_safe($dbg, 'context_get', ['d' => 0, 'c' => 1], '', 1.0, 1);
-                    if ($ctx1) foreach ($ctx1->property as $p) {
-                        $name = isset($p['name']) ? (string)$p['name'] : '';
-                        $super[$name] = prop_fetch($dbg, $p, true, 64, 1);
-                    }
+                    $locals = collect_context_tree($dbg, 0, 5, 64);
+                    $super = collect_context_tree($dbg, 1, 5, 64);
 
                     $snap = [
                         'status' => 'break',
