@@ -423,6 +423,22 @@ while (true) {
             $conn = stream_socket_accept($dbgSock, 0);
             if ($conn) {
                 stream_set_blocking($conn, true);
+
+                if ($state['dbg']) {
+                    // Check current status.
+                    $cur = dbgp_cmd_safe($state['dbg'], 'status', [], '', 0.6, 0);
+                    $cur_status = ($cur && isset($cur['status'])) ? (string)$cur['status'] : null;
+
+                    if ($cur_status === 'break' || $cur_status === 'starting' || $cur_status === 'running') {
+                        // Skip new connection.
+                        $init_probe = dbgp_read_packet($conn, 0.5);
+                        @fwrite($conn, "detach -i 1\0");
+                        @fclose($conn);
+                        dlog("DBGp: new attach rejected (active session: $cur_status)");
+                        continue;
+                    }
+                }
+
                 $init = dbgp_read_packet($conn, 3.0);
                 $state['dbg'] = $conn;
                 $state['init'] = $init;
@@ -430,24 +446,25 @@ while (true) {
                 echo "[DBGp] attached\n";
                 $clients[] = $conn;
 
-                foreach ([['max_children', 256], ['max_data', 8192], ['max_depth', 5], ['extended_properties', 1], ['show_hidden', 1]] as $f) {
+                foreach ([['max_children', 256], ['max_data', 8192], ['max_depth', 5],
+                             ['extended_properties', 1], ['show_hidden', 1],
+                             ['resolved_breakpoints', 1],
+                         ] as $f) {
                     dbgp_cmd_safe($conn, 'feature_set', ['n' => $f[0], 'v' => $f[1]], '', 1.0, 0);
-                    dlog("DBGp: features set");
                 }
-                dbgp_cmd_safe($conn, 'feature_set', ['n' => 'resolved_breakpoints', 'v' => 1], '', 1.0, 0);
 
                 $state['bps'] = [];
                 foreach ($state['desired_bps'] as $bp) {
                     $uri = $bp['uri'] ?? path_to_file_uri($bp['file']);
-                    $resp = dbgp_cmd_safe($conn, 'breakpoint_set', ['t' => 'line', 'f' => $uri, 'n' => $bp['line']], '', 1.5, 1);
+                    $resp = dbgp_cmd_safe($conn, 'breakpoint_set',
+                        ['t' => 'line', 'f' => $uri, 'n' => $bp['line']], '', 1.2, 1);
                     if ($resp && isset($resp['id'])) {
                         $id = (string)$resp['id'];
                         if ($id !== '') $state['bps'][$id] = ['file' => $bp['file'], 'uri' => $uri, 'line' => $bp['line']];
                     }
                 }
-                dlog("DBGp: desired_bps applied", ['count' => count($state['bps']), 'desired' => count($state['desired_bps'])]);
+
                 dbgp_cmd_safe($conn, 'run', [], '', 1.0, 0);
-                dlog("DBGp: send run");
             }
             continue;
         }
@@ -490,13 +507,14 @@ while (true) {
 <!doctype html><meta charset="utf-8">
 <title>PHP Web Debug (Xdebug + DBGp)</title>
 <style>
-body{font:16px/1.45 system-ui;margin:24px}
-input,button{font:inherit}
+body{font:16px/1.45 system-ui;margin:24px;background:#2b2d30;color:#c8ccd4}
+input,button{font:inherit;background:#c8ccd4}
+button{color:black}
 pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-height:60vh}
 .code-panel{display: flex;flex-direction: row;justify-content: space-between;}
-#stack{width: 50%;position:relative;margin: 12px 0 0 0}
-#stack-body{position: absolute;height: auto;width: 100%;top: 50%;transform: translateY(-50%);}
-#codewrap{margin-top:12px;border:1px solid #2a2a2a;border-radius:8px;overflow:hidden;background:#1e1f22;flex:1;width:50%;min-height:10vh}
+#stack{width: 50%;position:relative;margin: 12px 0 0 0;border:1px solid #404040;padding:0;}
+#stack-body{height: auto;width: 100%;padding:12px;}
+#codewrap{margin-top:12px;border:1px solid #404040;border-radius:8px;overflow:hidden;background:#1e1f22;flex:1;width:50%;height: fit-content}
 #codehdr{padding:8px 12px;font:500 13px/1.4 system-ui;color:#c8ccd4;background:#2b2d30;border-bottom:1px solid #2a2a2a}
 .codepane{font:13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace; display:flex; max-height:60vh; overflow:auto; color:#d7dae0}
 .codepane .gutter{background:#2b2d30;color:#80868f;user-select:none;padding:8px 0}
@@ -511,6 +529,8 @@ pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-
 .codepane .tok-num{color:#f78c6c}
 .codepane .tok-var{color:#82aaff}
 #vars{display:flex;margin-top:12px}
+#vars-locals{border:1px solid #404040}
+#vars-super{border:1px solid #404040}
 .block-title{font-weight:600;margin-bottom:6px;color:#c8ccd4}
 .var-tree{font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;color:#d7dae0;background:#111;padding:8px 10px;border-radius:6px;max-height:50vh;overflow:auto;border:1px solid #2a2a2a}
 .var-kv{margin-left:0.25rem}
@@ -523,7 +543,7 @@ pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-
 details { margin-left: 0.75rem }
 summary{cursor:pointer}
 </style>
-<h1>PHP Web Debug (Xdebug + DBGp)</h1>
+<h1>PHP Web Xdebug</h1>
 <p>Статус DBGp: <b id="status">…</b></p>
 <form id="bpForm" style="margin-bottom:8px">
   <input id="bp-filename" name="file" placeholder="C:\\\\Apache24\\\\htdocs\\\\server.php" size="120" required>
