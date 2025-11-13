@@ -57,7 +57,8 @@ function dbgp_arg_fullname($v)
 }
 
 /**
- * Windows C:\path → file:///C:/path ; Unix /path → file:///path
+ * Windows C:\path → file:///C:/path
+ * Unix /path → file:///path
  */
 function path_to_file_uri($path)
 {
@@ -93,11 +94,8 @@ function file_uri_to_path($uri)
 {
     if (!$uri) return '';
     if (strpos($uri, 'file://') !== 0) return $uri;
-    // file:///C:/...  или file:///var/...
     $p = substr($uri, 7);
-    // windows-диск: /C:/path → C:/path
     if (preg_match('#^/[A-Za-z]:/#', $p)) $p = substr($p, 1);
-    // нормализуем слэши
     return str_replace("\\", "/", $p);
 }
 
@@ -557,6 +555,7 @@ summary{cursor:pointer}
   <button id="btnStepOver">Step over</button>
   <button id="btnStepInto">Step into</button>
   <button id="btnStepOut">Step out</button>
+  <button id="btnKill" style="float:right">Kill DBG session</button>
 </p>
 <div class="code-panel">
     <div id="codewrap">
@@ -616,6 +615,13 @@ document.getElementById('btnStepOut').onclick = ()=>api('/dbg/api/step_out').the
 
 setInterval(refresh, 900); refresh();
 
+document.getElementById('btnKill').onclick = async () => {
+  try {
+    await fetch('/dbg/api/kill', { cache: 'no-store' });
+  } catch (e) {}
+  setTimeout(refresh, 100);
+};
+
 let __lastStackSig = null;
 
 function renderStack(st){
@@ -640,7 +646,6 @@ function renderStack(st){
   if (sig === __lastStackSig) return;
   __lastStackSig = sig;
 
-  // рендер
   el.textContent = JSON.stringify(view, null, 2);
 }
 let __lastRenderCodeSig = null;
@@ -796,6 +801,35 @@ HTML;
 
                 // API
                 $dbg = $state['dbg'];
+                if ($path === '/api/kill') {
+                    dlog('API kill: start');
+                    // Close active session.
+                    if ($state['dbg']) {
+                        // Try to detach.
+                        @fwrite($state['dbg'], "detach -i 1\0");
+                        // Close socket.
+                        @stream_set_blocking($state['dbg'], false);
+                        @fclose($state['dbg']);
+                        dlog('API kill: detached & closed active dbg');
+                        $state['dbg'] = null;
+                    }
+
+                    // Close the remaining connections.
+                    $kept = [];
+                    foreach ($clients as $h) {
+                        if ($h === $dbgSock || $h === $httpSock) {
+                            $kept[] = $h;
+                            continue;
+                        }
+                        @fclose($h);
+                    }
+                    $clients = $kept;
+
+                    $state['last_snapshot'] = null;
+                    http_json($conn, ['ok' => true]);
+                    fclose($conn);
+                    continue;
+                }
                 if ($path === '/api/status') {
                     dlog("API status", ['attached' => (bool)$dbg]);
                     $engine_status = null;
