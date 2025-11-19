@@ -9,8 +9,7 @@ const DBG_LOG_ENABLED = false;
 $DBG_PROJECT_BASE = getenv('DBG_PROJECT_BASE') ?: '';
 $DBG_SERVER_BASE = getenv('DBG_SERVER_BASE') ?: '/var/www/html';
 
-function dlog($msg, array $ctx = [])
-{
+function dlog($msg, array $ctx = []) {
     if (DBG_LOG_ENABLED) {
         $ts = date('Y-m-d H:i:s');
         $pid = getmypid();
@@ -27,16 +26,14 @@ function dlog($msg, array $ctx = [])
 
 
 // ---------- helpers ----------
-function starts_with($h, $n)
-{
+function starts_with($h, $n) {
     return strpos($h, $n) === 0;
 }
 
 /**
  * Кодирование значения аргумента DBGp (URL-style).
  */
-function dbgp_arg($v)
-{
+function dbgp_arg($v) {
     $enc = rawurlencode($v);
     return strtr($enc, [
         '%2F' => '/', '%3A' => ':',
@@ -46,8 +43,7 @@ function dbgp_arg($v)
     ]);
 }
 
-function dbgp_arg_fullname($v)
-{
+function dbgp_arg_fullname($v) {
     $enc = rawurlencode($v);
     return strtr($enc, [
         '%24' => '$',
@@ -60,8 +56,7 @@ function dbgp_arg_fullname($v)
  * Windows C:\path → file:///C:/path
  * Unix /path → file:///path
  */
-function path_to_file_uri($path)
-{
+function path_to_file_uri($path) {
     if (strpos($path, 'file://') === 0) return $path;
     if (preg_match('#^[A-Za-z]:\\\\#', $path)) {
         $path = str_replace('\\', '/', $path);
@@ -71,14 +66,12 @@ function path_to_file_uri($path)
     return $path;
 }
 
-function normalize_file_uri($s)
-{
+function normalize_file_uri($s) {
     if (!$s) return '';
     return (strpos($s, 'file://') === 0) ? $s : path_to_file_uri($s);
 }
 
-function is_our_break(array $frames, array $desired_bps): bool
-{
+function is_our_break(array $frames, array $desired_bps): bool {
     if (empty($frames)) return false;
     $top = $frames[0];
     $uri = normalize_file_uri($top['file'] ?? '');
@@ -90,8 +83,7 @@ function is_our_break(array $frames, array $desired_bps): bool
     return false;
 }
 
-function file_uri_to_path($uri)
-{
+function file_uri_to_path($uri) {
     if (!$uri) return '';
     if (strpos($uri, 'file://') !== 0) return $uri;
     $p = substr($uri, 7);
@@ -99,13 +91,11 @@ function file_uri_to_path($uri)
     return str_replace("\\", "/", $p);
 }
 
-function normalize_slashes($p)
-{
+function normalize_slashes($p) {
     return preg_replace('~\\\\+~', '/', (string)$p);
 }
 
-function parse_file_ref_and_map($raw, $q_line = 0)
-{
+function parse_file_ref_and_map($raw, $q_line = 0) {
     global $DBG_PROJECT_BASE, $DBG_SERVER_BASE;
 
     $s = trim((string)$raw);
@@ -156,8 +146,7 @@ function parse_file_ref_and_map($raw, $q_line = 0)
     return ['file' => $path, 'uri' => path_to_file_uri($path), 'line' => $line];
 }
 
-function html_escape($s)
-{
+function html_escape($s) {
     return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
@@ -166,8 +155,7 @@ function html_escape($s)
  *
  * @return array{ok:bool, file:string, start:int, end:int, line:int, lines:array<int,array{no:int,cur:bool,text:string}>, error?:string}
  */
-function read_source_context($file_or_uri, $line, $above = 10, $below = 10)
-{
+function read_source_context($file_or_uri, $line, $above = 10, $below = 10) {
     $path = file_uri_to_path($file_or_uri);
     if ($path === '' || !is_readable($path)) {
         return ['ok' => false, 'file' => $path, 'line' => $line, 'start' => 0, 'end' => 0, 'lines' => [], 'error' => 'file not readable'];
@@ -189,8 +177,7 @@ function read_source_context($file_or_uri, $line, $above = 10, $below = 10)
     return ['ok' => true, 'file' => $path, 'line' => $line, 'start' => $start, 'end' => $end, 'lines' => $out];
 }
 
-function dbgp_read_packet($sock, $timeout_sec = 3.0)
-{
+function dbgp_read_packet($sock, $timeout_sec = 3.0) {
     dlog("dbgp_read_packet: wait", ['timeout' => $timeout_sec]);
 
     $r = [$sock];
@@ -231,8 +218,7 @@ function dbgp_read_packet($sock, $timeout_sec = 3.0)
     return $payload;
 }
 
-function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, $retries = 1)
-{
+function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, $retries = 1) {
     static $txn = 0;
     do {
         $txn++;
@@ -263,8 +249,7 @@ function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, 
     return null;
 }
 
-function prop_scalar_or_summary(SimpleXMLElement $p)
-{
+function prop_scalar_or_summary(SimpleXMLElement $p) {
     if (isset($p['value'])) return (string)$p['value'];
 
     if (isset($p['encoding']) && strtolower((string)$p['encoding']) === 'base64') {
@@ -285,8 +270,7 @@ function prop_scalar_or_summary(SimpleXMLElement $p)
     return '';
 }
 
-function prop_fetch($sock, SimpleXMLElement $p, $expand_children = true, $max_children = 64, $ctx_id = 0)
-{
+function prop_fetch($sock, SimpleXMLElement $p, $expand_children = true, $max_children = 64, $ctx_id = 0) {
     $val = prop_scalar_or_summary($p);
     $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
 
@@ -313,8 +297,7 @@ function prop_fetch($sock, SimpleXMLElement $p, $expand_children = true, $max_ch
     return $val;
 }
 
-function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64)
-{
+function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64) {
     $val = prop_scalar_or_summary($p);
     $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
 
@@ -360,8 +343,7 @@ function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $d
     return $out;
 }
 
-function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64)
-{
+function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64) {
     $vars = [];
     $ctx = dbgp_cmd_safe($sock, 'context_get', ['d' => 0, 'c' => $ctx_id], '', 1.2, 1);
     if ($ctx && isset($ctx->property)) {
@@ -394,13 +376,15 @@ $state = ['dbg' => null, 'init' => null, 'bps' => [], 'desired_bps' => [], 'last
 echo "DBGp on $DBG_HOST:$DBG_PORT | Web UI on http://$HTTP_HOST:$HTTP_PORT\n";
 
 // ---------- http helpers ----------
-function http_reply($c, $code, $body, $ctype = 'application/json; charset=utf-8')
-{
-    fwrite($c, "HTTP/1.1 $code OK\r\nContent-Type: $ctype\r\nContent-Length: " . strlen($body) . "\r\n\r\n" . $body);
+function http_reply($c, $code, $body, $ctype = 'application/json; charset=utf-8') {
+    $hdr = "HTTP/1.1 $code OK\r\n"
+        . "Content-Type: $ctype\r\n"
+        . "Content-Length: " . strlen($body) . "\r\n"
+        . "Connection: close\r\n\r\n";
+    fwrite($c, $hdr . $body);
 }
 
-function http_json($c, $obj)
-{
+function http_json($c, $obj) {
     http_reply($c, 200, json_encode($obj, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 }
 
@@ -413,17 +397,14 @@ while (true) {
     stream_select($r, $w, $e, null);
 
     foreach ($r as $ready) {
-
         // New attach.
-        dlog("DBGp: ATTACH");
-        dlog("DBGp: init", ['head' => substr($init ?? '', 0, 200)]);
         if ($ready === $dbgSock) {
             $conn = stream_socket_accept($dbgSock, 0);
             if ($conn) {
+                dlog("DBGp: ATTACH");
                 stream_set_blocking($conn, true);
 
                 if ($state['dbg']) {
-                    // Check current status.
                     $cur = dbgp_cmd_safe($state['dbg'], 'status', [], '', 0.6, 0);
                     $cur_status = ($cur && isset($cur['status'])) ? (string)$cur['status'] : null;
 
@@ -435,6 +416,16 @@ while (true) {
                         dlog("DBGp: new attach rejected (active session: $cur_status)");
                         continue;
                     }
+
+                    // Any other status (stopping / stopped / ошибка) — drop old session.
+                    $old = $state['dbg'];
+                    $idx = array_search($old, $clients, true);
+                    if ($idx !== false) {
+                        unset($clients[$idx]);
+                    }
+                    @fclose($old);
+                    $state['dbg'] = null;
+                    $state['last_snapshot'] = null;
                 }
 
                 $init = dbgp_read_packet($conn, 3.0);
@@ -495,13 +486,12 @@ while (true) {
                     'query' => $queryString,
                     'orig' => $requestTarget
                 ]);
-                dlog("HTTP request", ['raw' => trim(strtok($req, "\r")), 'path' => $path]);
                 if (strpos($path, '/dbg/') === 0) {
                     $path = substr($path, 4);
                 }
 
                 if ($path === '/' || $path === '/index.html') {
-                    $html = <<<HTML
+                    $html = <<<'HTML'
 <!doctype html><meta charset="utf-8">
 <title>PHP Web Debug (Xdebug + DBGp)</title>
 <style>
@@ -613,7 +603,7 @@ document.getElementById('btnStepOver').onclick= ()=>api('/dbg/api/step_over').th
 document.getElementById('btnStepInto').onclick= ()=>api('/dbg/api/step_into').then(refresh);
 document.getElementById('btnStepOut').onclick = ()=>api('/dbg/api/step_out').then(refresh);
 
-setInterval(refresh, 900); refresh();
+setInterval(refresh, 1500); refresh();
 
 document.getElementById('btnKill').onclick = async () => {
   try {
@@ -660,8 +650,10 @@ function renderCode(ctx){
     return;
   }
   
-  const sig = ctx.file + ':' + ctx.line + '|' + ctx.start + '..' + ctx.end +
-  ctx.lines.map(l => l.no + ':' + l.cur ? '*' : '' + ':' + l.text).join('/n');
+  const sig = ctx.file + ':' + ctx.line + '|' + ctx.start + '..' + ctx.end + '|' +
+  ctx.lines
+    .map(l => `${l.no}:${l.cur ? '*' : ''}:${l.text}`)
+    .join('\n');
   if (sig === __lastRenderCodeSig) {
       return;
   }
@@ -690,7 +682,15 @@ function renderCode(ctx){
   view.appendChild(lines);
 }
 
-function escHtml(s){return s.replace(/[&<>"']/g, m=>({ '&':'&nbsp;&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m] ).replace(/^&nbsp;/,''));}
+function escHtml(s){
+  return s.replace(/[&<>"']/g, m => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[m]));
+}
 
 function renderVarNode(key, val, depth=0){
   const container = document.createElement('div');
@@ -831,6 +831,11 @@ HTML;
                     continue;
                 }
                 if ($path === '/api/status') {
+                    if (!$dbg) {
+                        http_json($conn, ['attached' => false, 'engine_status' => null]);
+                        fclose($conn);
+                        continue;
+                    }
                     dlog("API status", ['attached' => (bool)$dbg]);
                     $engine_status = null;
                     $auto = null;
@@ -842,18 +847,21 @@ HTML;
                         if ($engine_status === 'stopping' && empty($state['stepping'])) {
                             $frames = [];
                             $stack = dbgp_cmd_safe($dbg, 'stack_get', [], '', 1.0, 1);
-                            if ($stack) {
+                            if ($stack && isset($stack->stack)) {
                                 foreach ($stack->stack as $f) {
                                     $frames[] = [
                                         'level' => (int)$f['level'],
-                                        'file' => (string)$f['filename'],
-                                        'line' => (int)$f['lineno'],
+                                        'file'  => (string)$f['filename'],
+                                        'line'  => (int)$f['lineno'],
                                         'where' => (string)$f['where'],
-                                        'type' => (string)$f['type'],
+                                        'type'  => (string)$f['type'],
                                     ];
                                 }
                             }
-                            if (!is_our_break($frames, array_values($state['desired_bps']))) {
+
+                            if (!$frames) {
+                                dlog("API status: stopping without stack, assume script is finishing");
+                            } elseif (!is_our_break($frames, array_values($state['desired_bps']))) {
                                 dlog("API status: auto-continue (not our stop)", ['top' => $frames[0] ?? null]);
                                 dbgp_cmd_safe($dbg, 'run', [], '', 1.0, 0);
                                 $engine_status = 'running';
@@ -1034,27 +1042,27 @@ HTML;
 
         // ---- DBGp async events ----
         if ($ready === $state['dbg']) {
-            $xml = dbgp_read_packet($state['dbg'], 0.5);
-            if ($xml === null) {
-                dlog("DBGp async: idle", []);
-                continue;
-            } else {
+            $xml = dbgp_read_packet($state['dbg'], 0.1);
+
+            if ($xml !== null) {
                 $sx = @simplexml_load_string($xml);
                 if ($sx) {
                     $name = $sx->getName();
                     $status = isset($sx['status']) ? (string)$sx['status'] : '';
                     $command = isset($sx['command']) ? (string)$sx['command'] : '';
-                    dlog("DBGp async: packet", ['name' => $name, 'status' => $status, 'command' => $command, 'head' => substr($xml, 0, 120)]);
+                    dlog("DBGp async: packet", ['name' => $name, 'status' => $status, 'command' => $command]);
                 } else {
                     dlog("DBGp async: non-XML", ['head' => substr($xml, 0, 120)]);
                 }
             }
-            $xml = dbgp_read_packet($state['dbg'], 0.5);
-            if ($xml === null) {
+
+            $meta = stream_get_meta_data($state['dbg']);
+            if (!empty($meta['eof'])) {
                 $idx = array_search($state['dbg'], $clients, true);
                 if ($idx !== false) unset($clients[$idx]);
+                @fclose($state['dbg']);
                 $state['dbg'] = null;
-                dlog("DBGp: CLOSED");
+                dlog("DBGp: CLOSED (eof=1)");
                 echo "[DBGp] closed\n";
             }
         }
