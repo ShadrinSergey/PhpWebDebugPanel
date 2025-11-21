@@ -16,7 +16,8 @@ function dlog($msg, array $ctx = []) {
         if (!empty($ctx)) {
             $ctx = json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             $line = "[$ts][$pid] $msg | $ctx\n";
-        } else {
+        }
+        else {
             $line = "[$ts][$pid] $msg\n";
         }
         @file_put_contents(DBG_LOG_FILE, $line, FILE_APPEND);
@@ -131,7 +132,8 @@ function parse_file_ref_and_map($raw, $q_line = 0) {
         $pb = rtrim(normalize_slashes($DBG_PROJECT_BASE), '/');
         if (strpos($rel, $pb . '/') === 0) {
             $rel = substr($rel, strlen($pb) + 1);
-        } elseif ($rel === $pb) {
+        }
+        elseif ($rel === $pb) {
             $rel = '';
         }
     }
@@ -139,7 +141,8 @@ function parse_file_ref_and_map($raw, $q_line = 0) {
     if ($DBG_SERVER_BASE !== '') {
         $sb = rtrim(normalize_slashes($DBG_SERVER_BASE), '/');
         $path = $rel !== '' ? ($sb . '/' . ltrim($rel, '/')) : $sb;
-    } else {
+    }
+    else {
         $path = $rel;
     }
 
@@ -226,7 +229,8 @@ function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, 
         foreach ($args as $k => $v) {
             if ($cmd === 'property_get' && $k === 'n') {
                 $argStr .= ' -' . $k . ' ' . dbgp_arg_fullname($v);
-            } else {
+            }
+            else {
                 $argStr .= ' -' . $k . ' ' . dbgp_arg($v);
             }
         }
@@ -250,15 +254,39 @@ function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, 
 }
 
 function prop_scalar_or_summary(SimpleXMLElement $p) {
-    if (isset($p['value'])) return (string)$p['value'];
+    if (isset($p['value'])) {
+        return (string)$p['value'];
+    }
 
+    if (isset($p->value)) {
+        $v = $p->value;
+        $raw = (string)$v;
+
+        $enc = isset($v['encoding']) ? strtolower((string)$v['encoding']) : '';
+
+        if ($enc === 'base64') {
+            $decoded = base64_decode($raw, true);
+            if ($decoded !== false) {
+                return $decoded;
+            }
+        }
+
+        $txt = trim($raw);
+        if ($txt !== '') {
+            return $txt;
+        }
+    }
+
+    // Fallback.
     if (isset($p['encoding']) && strtolower((string)$p['encoding']) === 'base64') {
         $raw = base64_decode((string)$p, true);
         return $raw !== false ? $raw : '';
     }
 
     $txt = trim((string)$p);
-    if ($txt !== '') return $txt;
+    if ($txt !== '') {
+        return $txt;
+    }
 
     $children = isset($p['children']) ? (int)$p['children'] : 0;
     if ($children === 1) {
@@ -270,41 +298,16 @@ function prop_scalar_or_summary(SimpleXMLElement $p) {
     return '';
 }
 
-function prop_fetch($sock, SimpleXMLElement $p, $expand_children = true, $max_children = 64, $ctx_id = 0) {
-    $val = prop_scalar_or_summary($p);
-    $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
-
-    if (!$has_children && $val === '' && isset($p['fullname'])) {
-        $resp = dbgp_cmd_safe($sock, 'property_get', [
-            'n' => (string)$p['fullname'], 'd' => 0, 'c' => $ctx_id
-        ], '', 2.0, 1);
-        if ($resp && isset($resp->property)) $val = prop_scalar_or_summary($resp->property);
-    }
-
-    if ($expand_children && $has_children && isset($p['fullname'])) {
-        $out = [];
-        $resp = dbgp_cmd_safe($sock, 'property_get', [
-            'n' => (string)$p['fullname'], 'd' => 0, 'c' => $ctx_id
-        ], '', 2.0, 1);
-        if ($resp && isset($resp->property->property)) {
-            foreach ($resp->property->property as $child) {
-                $name = isset($child['name']) ? (string)$child['name'] : '';
-                $out[$name] = prop_scalar_or_summary($child);
-            }
-            return $out;
-        }
-    }
-    return $val;
-}
 
 function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64) {
     $val = prop_scalar_or_summary($p);
     $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
+    $fullname = prop_fullname($p);
 
     if (!$has_children) {
-        if ($val === '' && isset($p['fullname'])) {
+        if ($val === '' && $fullname !== '') {
             $resp = dbgp_cmd_safe($sock, 'property_get', [
-                'n' => (string)$p['fullname'], 'd' => 0, 'c' => $ctx_id
+                'n' => $fullname, 'd' => 0, 'c' => $ctx_id
             ], '', 2.0, 1);
             if ($resp && isset($resp->property)) {
                 $val = prop_scalar_or_summary($resp->property);
@@ -316,26 +319,39 @@ function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $d
     $type = isset($p['type']) ? (string)$p['type'] : 'array';
     $out = ['__type' => $type, '__children' => []];
 
-    if ($depth_left <= 0 || !isset($p['fullname'])) {
+    if ($depth_left <= 0) {
         $n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
         $out['__summary'] = $type . '(' . $n . ')';
         return $out;
     }
 
-    $resp = dbgp_cmd_safe($sock, 'property_get', [
-        'n' => (string)$p['fullname'],
-        'd' => 0,
-        'c' => $ctx_id
-    ], '', 2.0, 1);
+    $childrenSource = null;
 
-    if ($resp && isset($resp->property->property)) {
-        $i = 0;
-        foreach ($resp->property->property as $child) {
-            if ($i++ >= $max_children) break;
-            $name = isset($child['name']) ? (string)$child['name'] : '';
-            $out['__children'][$name] = prop_tree_from_property($child, $sock, $ctx_id, $depth_left - 1, $max_children);
+    if (isset($p->property)) {
+        $childrenSource = $p->property;
+    }
+    elseif ($fullname !== '') {
+        $resp = dbgp_cmd_safe($sock, 'property_get', [
+            'n' => $fullname,
+            'd' => 0,
+            'c' => $ctx_id
+        ], '', 2.0, 1);
+
+        if ($resp && isset($resp->property->property)) {
+            $childrenSource = $resp->property->property;
         }
-    } else {
+    }
+
+    if ($childrenSource) {
+        $i = 0;
+        foreach ($childrenSource as $child) {
+            if ($i++ >= $max_children) break;
+            $name = prop_name($child);
+            $out['__children'][$name] =
+                prop_tree_from_property($child, $sock, $ctx_id, $depth_left - 1, $max_children);
+        }
+    }
+    else {
         $n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
         $out['__summary'] = $type . '(' . $n . ')';
     }
@@ -343,12 +359,114 @@ function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $d
     return $out;
 }
 
+function prop_fullname(SimpleXMLElement $p): string {
+    if (isset($p['fullname']) && (string)$p['fullname'] !== '') {
+        return (string)$p['fullname'];
+    }
+
+    if (isset($p->fullname)) {
+        $f = $p->fullname;
+        $val = (string)$f;
+        if ($val !== '') {
+            $enc = isset($f['encoding']) ? strtolower((string)$f['encoding']) : '';
+            if ($enc === 'base64') {
+                $decoded = base64_decode($val, true);
+                if ($decoded !== false && $decoded !== '') {
+                    return $decoded;
+                }
+            }
+            else {
+                return $val;
+            }
+        }
+    }
+
+    if (isset($p['name']) && (string)$p['name'] !== '') {
+        return (string)$p['name'];
+    }
+    if (isset($p->name)) {
+        $n = $p->name;
+        $val = (string)$n;
+        if ($val !== '') {
+            $enc = isset($n['encoding']) ? strtolower((string)$n['encoding']) : '';
+            if ($enc === 'base64') {
+                $decoded = base64_decode($val, true);
+                if ($decoded !== false && $decoded !== '') {
+                    return $decoded;
+                }
+            }
+            else {
+                return $val;
+            }
+        }
+    }
+
+    return '';
+}
+
+function prop_name(SimpleXMLElement $p): string {
+    if (isset($p['name']) && (string)$p['name'] !== '') {
+        return (string)$p['name'];
+    }
+
+    if (isset($p->name)) {
+        $n = $p->name;
+        $val = (string)$n;
+
+        if ($val !== '') {
+            $enc = isset($n['encoding']) ? strtolower((string)$n['encoding']) : '';
+            if ($enc === 'base64') {
+                $decoded = base64_decode($val, true);
+                if ($decoded !== false && $decoded !== '') {
+                    return $decoded;
+                }
+            }
+            else {
+                return $val;
+            }
+        }
+    }
+
+    if (isset($p['key']) && (string)$p['key'] !== '') {
+        return (string)$p['key'];
+    }
+
+    $full = null;
+    if (isset($p['fullname']) && (string)$p['fullname'] !== '') {
+        $full = (string)$p['fullname'];
+    }
+    elseif (isset($p->fullname)) {
+        $f = $p->fullname;
+        $val = (string)$f;
+        if ($val !== '') {
+            $enc = isset($f['encoding']) ? strtolower((string)$f['encoding']) : '';
+            if ($enc === 'base64') {
+                $decoded = base64_decode($val, true);
+                if ($decoded !== false && $decoded !== '') {
+                    $full = $decoded;
+                }
+            }
+            else {
+                $full = $val;
+            }
+        }
+    }
+
+    if ($full !== null) {
+        if (preg_match('/\[([\'"])(.*)]$/u', $full, $m)) {
+            return $m[2];
+        }
+    }
+
+    return '';
+}
+
 function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64) {
     $vars = [];
     $ctx = dbgp_cmd_safe($sock, 'context_get', ['d' => 0, 'c' => $ctx_id], '', 1.2, 1);
     if ($ctx && isset($ctx->property)) {
         foreach ($ctx->property as $p) {
-            $name = isset($p['name']) ? (string)$p['name'] : '';
+            $name = prop_name($p);
             $vars[$name] = prop_tree_from_property($p, $sock, $ctx_id, $depth, $max_children);
         }
     }
@@ -763,7 +881,7 @@ function renderVarTree(rootEl, dataObj){
   rootEl.className = 'var-tree';
   const frag = document.createDocumentFragment();
 
-  const names = Object.keys(dataObj).sort(); // <-- сортируем
+  const names = Object.keys(dataObj).sort();
   for (let i = 0; i < names.length; i++) {
     const k = names[i];
     frag.appendChild(renderVarNode(k, dataObj[k], 0));
@@ -851,22 +969,24 @@ HTML;
                                 foreach ($stack->stack as $f) {
                                     $frames[] = [
                                         'level' => (int)$f['level'],
-                                        'file'  => (string)$f['filename'],
-                                        'line'  => (int)$f['lineno'],
+                                        'file' => (string)$f['filename'],
+                                        'line' => (int)$f['lineno'],
                                         'where' => (string)$f['where'],
-                                        'type'  => (string)$f['type'],
+                                        'type' => (string)$f['type'],
                                     ];
                                 }
                             }
 
                             if (!$frames) {
                                 dlog("API status: stopping without stack, assume script is finishing");
-                            } elseif (!is_our_break($frames, array_values($state['desired_bps']))) {
+                            }
+                            elseif (!is_our_break($frames, array_values($state['desired_bps']))) {
                                 dlog("API status: auto-continue (not our stop)", ['top' => $frames[0] ?? null]);
                                 dbgp_cmd_safe($dbg, 'run', [], '', 1.0, 0);
                                 $engine_status = 'running';
                                 $auto = ['auto_continued' => true, 'skipped_top' => $frames[0] ?? null];
-                            } else {
+                            }
+                            else {
                                 // Our stop - stay.
                                 $state['stepping'] = false;
                             }
@@ -1051,7 +1171,8 @@ HTML;
                     $status = isset($sx['status']) ? (string)$sx['status'] : '';
                     $command = isset($sx['command']) ? (string)$sx['command'] : '';
                     dlog("DBGp async: packet", ['name' => $name, 'status' => $status, 'command' => $command]);
-                } else {
+                }
+                else {
                     dlog("DBGp async: non-XML", ['head' => substr($xml, 0, 120)]);
                 }
             }
