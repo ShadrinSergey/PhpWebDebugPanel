@@ -492,12 +492,34 @@ function prop_name(SimpleXMLElement $p): string {
     return '';
 }
 
-function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64) {
+function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64, array $skip = []) {
     $vars = [];
+    $skipSet = [];
+    foreach ($skip as $s) {
+        $s = (string)$s;
+        if ($s === '') {
+            continue;
+        }
+        $skipSet[$s] = true;
+        if ($s[0] !== '$') {
+            $skipSet['$' . $s] = true;
+        }
+    }
+
     $ctx = dbgp_cmd_safe($sock, 'context_get', ['d' => 0, 'c' => $ctx_id], '', 1.2, 1);
     if ($ctx && isset($ctx->property)) {
         foreach ($ctx->property as $p) {
             $name = prop_name($p);
+            if (isset($skipSet[$name])) {
+                $type = isset($p['type']) ? (string)$p['type'] : 'array';
+                $numchildren = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
+                $vars[$name] = [
+                    '__type' => $type,
+                    '__summary' => $type . '(' . $numchildren . ')',
+                ];
+                continue;
+            }
+
             $vars[$name] = prop_tree_from_property($p, $sock, $ctx_id, $depth, $max_children);
         }
     }
@@ -693,6 +715,7 @@ summary{cursor:pointer}
   <button id="btnStepInto">Step into</button>
   <button id="btnStepOut">Step out</button>
   <button id="btnKill" style="float:right">Kill DBG session</button>
+  <button id="btnRestart" style="float:right">Restart service</button>
 </p>
 <div class="code-panel">
     <div id="codewrap">
@@ -714,6 +737,11 @@ summary{cursor:pointer}
 <script>
 async function api(p){const r=await fetch(p);return r.json()}
 let $autoContinueCount = 0;
+const urlParams = new URLSearchParams(window.location.search);
+const skipParams = new URLSearchParams();
+for (const v of urlParams.getAll('skip')) skipParams.append('skip', v);
+for (const v of urlParams.getAll('skip[]')) skipParams.append('skip[]', v);
+const STACK_SKIP_QS = skipParams.toString() ? ('?' + skipParams.toString()) : '';
 async function refresh(){
   try{
     const s = await api('/dbg/api/status');
@@ -731,7 +759,7 @@ async function refresh(){
         }
     }
 
-    const st = await api('/dbg/api/stack');
+    const st = await api('/dbg/api/stack' + STACK_SKIP_QS);
     const localsEl = document.getElementById('vars-locals');
     const superEl  = document.getElementById('vars-super');
     renderStack(st);
@@ -770,6 +798,13 @@ document.getElementById('btnKill').onclick = async () => {
     await fetch('/dbg/api/kill', { cache: 'no-store' });
   } catch (e) {}
   setTimeout(refresh, 100);
+};
+
+document.getElementById('btnRestart').onclick = async () => {
+  try {
+    await fetch('/dbg/?restart=1', { cache: 'no-store' });
+  } catch (e) {}
+  setTimeout(window.location.reload, 500);
 };
 
 let __lastStackSig = null;
@@ -1102,6 +1137,26 @@ HTML;
                 }
 
                 if ($path === '/api/stack') {
+                    $skip = [];
+                    if (isset($q['skip'])) {
+                        if (is_array($q['skip'])) {
+                            foreach ($q['skip'] as $v) {
+                                $v = trim((string)$v);
+                                if ($v !== '') {
+                                    $skip[] = $v;
+                                }
+                            }
+                        } else {
+                            $parts = explode(',', (string)$q['skip']);
+                            foreach ($parts as $v) {
+                                $v = trim($v);
+                                if ($v !== '') {
+                                    $skip[] = $v;
+                                }
+                            }
+                        }
+                    }
+
                     $st = dbgp_cmd_safe($dbg, 'status', [], '', 1.0, 0);
                     $engine_status = ($st && isset($st['status'])) ? (string)$st['status'] : 'unknown';
                     if ($engine_status !== 'break') {
@@ -1142,9 +1197,8 @@ HTML;
                         }
                     }
 
-                    // Take snapshot.
-                    $locals = collect_context_tree($dbg, 0, 5, 64);
-                    $super = collect_context_tree($dbg, 1, 5, 64);
+                    $locals = collect_context_tree($dbg, 0, 5, 64, $skip);
+                    $super = collect_context_tree($dbg, 1, 5, 64, $skip);
 
                     $snap = [
                         'status' => 'break',
