@@ -26,7 +26,6 @@ function dlog($msg, array $ctx = []) {
 }
 
 
-// ---------- helpers ----------
 function starts_with($h, $n) {
     return strpos($h, $n) === 0;
 }
@@ -223,6 +222,7 @@ function dbgp_read_packet($sock, $timeout_sec = 3.0) {
 
 function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, $retries = 1) {
     static $txn = 0;
+    $txn = $txn % 1000000;
     do {
         $txn++;
         $argStr = '';
@@ -254,6 +254,14 @@ function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, 
 }
 
 function prop_scalar_or_summary(SimpleXMLElement $p) {
+    $type = isset($p['type']) ? (string)$p['type'] : '';
+    $size = isset($p['size']) ? (int)$p['size'] : null;
+    $max_preview_size = 8192;
+
+    if ($type === 'string' && $size !== null && $size > $max_preview_size) {
+        return 'string(' . $size . ')';
+    }
+
     if (isset($p['value'])) {
         return (string)$p['value'];
     }
@@ -261,10 +269,13 @@ function prop_scalar_or_summary(SimpleXMLElement $p) {
     if (isset($p->value)) {
         $v = $p->value;
         $raw = (string)$v;
-
         $enc = isset($v['encoding']) ? strtolower((string)$v['encoding']) : '';
 
         if ($enc === 'base64') {
+            $size = strlen($raw);
+            if ($size > $max_preview_size * 2) {
+                return 'string(' . $size . ')';
+            }
             $decoded = base64_decode($raw, true);
             if ($decoded !== false) {
                 return $decoded;
@@ -280,6 +291,10 @@ function prop_scalar_or_summary(SimpleXMLElement $p) {
     // Fallback.
     if (isset($p['encoding']) && strtolower((string)$p['encoding']) === 'base64') {
         $raw = base64_decode((string)$p, true);
+        $size = strlen($raw);
+        if ($size > $max_preview_size * 2) {
+            return 'string(' . $size . ')';
+        }
         return $raw !== false ? $raw : '';
     }
 
@@ -300,8 +315,24 @@ function prop_scalar_or_summary(SimpleXMLElement $p) {
 
 
 function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64) {
+    $type = isset($p['type']) ? (string)$p['type'] : '';
+
+    if ($type === 'resource') {
+        return prop_scalar_or_summary($p);
+    }
+
+    if ($type === 'array') {
+        $numchildren = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
+        if ($numchildren > $max_children * 4) {
+            return [
+                '__type' => $type,
+                '__summary' => $type . '(' . $numchildren . ')',
+            ];
+        }
+    }
+
     $val = prop_scalar_or_summary($p);
-    $has_children = isset($p['children']) ? ((int)$p['children'] === 1) : false;
+    $has_children = isset($p['children']) && (int)$p['children'] === 1;
     $fullname = prop_fullname($p);
 
     if (!$has_children) {
@@ -453,7 +484,7 @@ function prop_name(SimpleXMLElement $p): string {
     }
 
     if ($full !== null) {
-        if (preg_match('/\[([\'"])(.*)]$/u', $full, $m)) {
+        if (preg_match('/\[(["\'])(.*?)\1]$/u', $full, $m)) {
             return $m[2];
         }
     }
@@ -473,7 +504,6 @@ function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_child
     return $vars;
 }
 
-// ---------- sockets ----------
 $DBG_HOST = '127.0.0.1';
 $DBG_PORT = 9003;
 $HTTP_HOST = '127.0.0.1';
@@ -489,11 +519,9 @@ stream_set_blocking($httpSock, false);
 
 dlog("START panel", ['DBGp' => "$DBG_HOST:$DBG_PORT", 'HTTP' => "$HTTP_HOST:$HTTP_PORT"]);
 
-// ---------- state ----------
 $state = ['dbg' => null, 'init' => null, 'bps' => [], 'desired_bps' => [], 'last_snapshot' => null, 'stepping' => false];
 echo "DBGp on $DBG_HOST:$DBG_PORT | Web UI on http://$HTTP_HOST:$HTTP_PORT\n";
 
-// ---------- http helpers ----------
 function http_reply($c, $code, $body, $ctype = 'application/json; charset=utf-8') {
     $hdr = "HTTP/1.1 $code OK\r\n"
         . "Content-Type: $ctype\r\n"
@@ -506,7 +534,6 @@ function http_json($c, $obj) {
     http_reply($c, 200, json_encode($obj, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
 }
 
-// ---------- main loop ----------
 $clients = [$dbgSock, $httpSock];
 
 while (true) {
@@ -576,7 +603,6 @@ while (true) {
             continue;
         }
 
-        // ---- http ----
         if ($ready === $httpSock) {
             $conn = stream_socket_accept($httpSock, 0);
             if ($conn) {
@@ -594,7 +620,9 @@ while (true) {
                 $path = parse_url($requestTarget, PHP_URL_PATH) ?: '/';
                 $queryString = parse_url($requestTarget, PHP_URL_QUERY) ?? '';
                 $q = [];
-                if ($queryString !== '') parse_str($queryString, $q);
+                if ($queryString !== '') {
+                    parse_str($queryString, $q);
+                };
                 if (!empty($q['restart'])) {
                     exit(1);
                 }
@@ -640,6 +668,7 @@ pre{background:#111;color:#ddd;padding:12px;border-radius:6px;overflow:auto;max-
 .block-title{font-weight:600;margin-bottom:6px;color:#c8ccd4}
 .var-tree{font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;color:#d7dae0;background:#111;padding:8px 10px;border-radius:6px;max-height:50vh;overflow:auto;border:1px solid #2a2a2a}
 .var-kv{margin-left:0.25rem}
+details .var-kv{margin-left:0.9rem}
 .var-key{color:#82aaff}
 .var-type{color:#c792ea}
 .var-scalar{color:#e2e5e9;white-space:pre-wrap}
@@ -684,10 +713,23 @@ summary{cursor:pointer}
 </div>
 <script>
 async function api(p){const r=await fetch(p);return r.json()}
+let $autoContinueCount = 0;
 async function refresh(){
   try{
     const s = await api('/dbg/api/status');
     document.getElementById('status').textContent = s.attached? ('attached / '+(s.engine_status||'unknown')) : 'waiting…';
+    
+    if (s.attached && s.engine_status === 'stopping') {
+        $autoContinueCount++;
+        if ($autoContinueCount >= 3) {
+            $autoContinueCount = 0;
+            await api('/dbg/api/run');
+            return;
+        }
+        else {
+            setTimeout(refresh, 300);
+        }
+    }
 
     const st = await api('/dbg/api/stack');
     const localsEl = document.getElementById('vars-locals');
@@ -1160,7 +1202,6 @@ HTML;
             }
         }
 
-        // ---- DBGp async events ----
         if ($ready === $state['dbg']) {
             $xml = dbgp_read_packet($state['dbg'], 0.1);
 
