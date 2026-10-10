@@ -1,0 +1,17 @@
+[Unit]
+Description=PHP DBGp Web Debug Panel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/php /var/www/dbg/dbgpanel.php
+Restart=always
+RestartSec=1
+User=www-data
+Group=www-data
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

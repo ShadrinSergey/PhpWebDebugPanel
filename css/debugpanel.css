@@ -1,0 +1,218 @@
+body {
+    font: 16px/1.45 system-ui;
+    margin: 24px;
+    background: #2b2d30;
+    color: #c8ccd4
+}
+
+input, button {
+    font: inherit;
+    background: #c8ccd4
+}
+
+button {
+    color: black
+}
+
+pre {
+    background: #111;
+    color: #ddd;
+    padding: 12px;
+    border-radius: 6px;
+    overflow: auto;
+    max-height: 60vh
+}
+
+.code-panel {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+#stack {
+    width: 50%;
+    position: relative;
+    margin: 12px 0 0 0;
+    border: 1px solid #404040;
+    padding: 0;
+}
+
+#stack-body {
+    height: auto;
+    width: 100%;
+    padding: 12px;
+}
+
+#codewrap {
+    margin-top: 12px;
+    border: 1px solid #404040;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1e1f22;
+    flex: 1;
+    width: 50%;
+    height: fit-content
+}
+
+#codehdr {
+    padding: 8px 12px;
+    font: 500 13px/1.4 system-ui;
+    color: #c8ccd4;
+    background: #2b2d30;
+    border-bottom: 1px solid #2a2a2a
+}
+
+.codepane {
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    display: flex;
+    max-height: 60vh;
+    overflow: auto;
+    color: #d7dae0
+}
+
+.codepane .gutter {
+    background: #2b2d30;
+    color: #80868f;
+    user-select: none;
+    padding: 8px 0
+}
+
+.codepane .gutter div {
+    padding: 0 12px;
+    text-align: right;
+    min-width: 46px
+}
+
+.codepane .lines {
+    flex: 1;
+    white-space: pre;
+    tab-size: 4;
+    padding: 8px 12px
+}
+
+.codepane .line {
+    white-space: pre
+}
+
+.codepane .cur {
+    background: #42464d
+}
+
+.codepane .cur-num {
+    color: #e2e5e9;
+    font-weight: 600
+}
+
+.codepane .cur .tok-kw {
+    color: #c792ea
+}
+
+.codepane .tok-kw {
+    color: #c792ea
+}
+
+.codepane .tok-str {
+    color: #ecc48d
+}
+
+.codepane .tok-num {
+    color: #f78c6c
+}
+
+.codepane .tok-var {
+    color: #82aaff
+}
+
+#vars {
+    display: flex;
+    margin-top: 12px
+}
+
+#vars-locals {
+    border: 1px solid #404040
+}
+
+#vars-super {
+    border: 1px solid #404040
+}
+
+.block-title {
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: #c8ccd4
+}
+
+.var-tree {
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    color: #d7dae0;
+    background: #111;
+    padding: 8px 10px;
+    border-radius: 6px;
+    max-height: 50vh;
+    overflow: auto;
+    border: 1px solid #2a2a2a
+}
+
+.var-kv {
+    margin-left: 0.25rem
+}
+
+details .var-kv {
+    margin-left: 0.9rem
+}
+
+.var-key {
+    color: #82aaff
+}
+
+.var-type {
+    color: #c792ea
+}
+
+.var-scalar {
+    color: #e2e5e9;
+    white-space: pre-wrap
+}
+
+.var-summary {
+    color: #80868f
+}
+
+.var-tree > div > details {
+    margin-left: 0.25rem;
+}
+
+.vars-col {
+    width: 50%
+}
+
+details {
+    margin-left: 0.75rem
+}
+
+summary {
+    cursor: pointer
+}
+
+#xdebug-toggle {
+    position: fixed;
+    top: 15px;
+    right: 15px;
+    width: 70px;
+    height: 34px;
+    background: #ccc;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background 0.3s;
+}
+
+#xdebug-trigger {
+    width: 30px;
+    height: 30px;
+    background: white;
+    border-radius: 50%;
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    transition: left 0.3s;
+}
