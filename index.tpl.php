@@ -9,11 +9,30 @@
 
 <form id="bpForm" style="margin-bottom:8px">
     <label for="bp-filename">
-        <input id="bp-filename" name="file" placeholder="/var/www/html/index.php:3" size="120" required>
+        <input id="bp-filename"
+               name="file"
+               placeholder="/var/www/html/index.php:3"
+               size="120"
+               required
+        >
     </label>
+    <div class="condition">
+        <label for="bp-condition">Condition(optional):</label>
+        <input id="bp-condition"
+               name="condition"
+               placeholder="$i > 10 && $enabled"
+               size="70"
+               maxlength="4096"
+               autocomplete="off"
+        >
+        <small>
+           Empty — regular breakpoint.
+        </small>
+    </div>
     <button id="set-bp">Set breakpoint</button>
     <button type="button" id="btnList">List</button>
     <button type="button" id="btnClear">Clear all</button>
+    <span id="bp-message" role="status"></span>
 </form>
 <p>
     <button id="btnCont">Continue</button>
@@ -42,3 +61,4 @@
 </div>
 <link rel="stylesheet" href="css/debugpanel.css"/>
 <script src="js/debugpanel.js"></script>
+<script src="js/debugpanel.inspector.js"></script>

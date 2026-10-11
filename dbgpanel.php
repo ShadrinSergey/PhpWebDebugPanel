@@ -395,7 +395,9 @@ function property_tree(SimpleXMLElement $p, int $context, int $generation, int $
 	if ($depth < 1 && isset($p->property)) {
 		foreach ($p->property as $child) {
 			$name = prop_name($child);
-			if ($name === '') $name = '#' . ($loaded + 1 + $page * $pageSize);
+			if ($name === '') {
+				$name = '#' . ($loaded + 1 + $page * $pageSize);
+			}
 			// Avoid overwriting different properties with identical short names.
 			$key = $name;
 			$suffix = 2;
@@ -528,195 +530,6 @@ function http_json($id, $value, $status = 200) {
 	http_response($id, $status, $str);
 }
 
-function inspector_frontend_js(): string {
-	return <<<'JS'
-(function () {
-  'use strict';
-  function enableVariableInspector() {
-    if (typeof window.renderVarNode !== 'function') {
-        return;
-    }
-    const original = window.renderVarNode;
-    const make = (tag, className, content) => {
-      const el = document.createElement(tag);
-      if (className) {
-          el.className = className;
-      }
-      if (content !== undefined) {
-          el.textContent = String(content);
-      }
-      return el;
-    };
-    function formatSummary(value) {
-      return value.__summary || (value.__type || 'value') +
-        (Number.isFinite(value.__numchildren) ? '(' + value.__numchildren + ')' : '');
-    }
-    window.renderVarNode = function (key, value, depth = 0) {
-      if (!value || typeof value !== 'object' || !('__type' in value)) {
-        return original(key, value, depth);
-      }
-      const root = make('div');
-      const details = make('details');
-      const sum = make('summary');
-      sum.appendChild(make('span', 'var-key', key));
-      sum.appendChild(document.createTextNode(': '));
-      sum.appendChild(make('span', 'var-type', value.__type));
-      sum.appendChild(document.createTextNode(' '));
-      sum.appendChild(make('span', 'var-summary', formatSummary(value)));
-      details.appendChild(sum);
-      const content = make('div');
-      details.appendChild(content);
-      root.appendChild(details);
-
-      const fullname = value.__fullname;
-      const request = async (page, maxData) => {
-        const qs = new URLSearchParams({
-          name: fullname, ctx: value.__context, generation: value.__generation,
-          page: page, max_data: maxData
-        });
-        const resp = await fetch('/dbg/api/property?' + qs.toString(), {cache: 'no-store'});
-        const body = await resp.json();
-        if (!resp.ok || !body.ok) {
-            throw new Error(body.error || 'Cannot fetch property');
-        }
-        return body.property;
-      };
-      let busy = false, initialized = false;
-      const total = Number(value.__numchildren) || 0;
-      const isContainer = value.__children && typeof value.__children === 'object';
-      if (isContainer) {
-        let loaded = 0;
-        let next = value.__next_page;
-        let moreButton = null;
-        const seen = new Set();
-        function appendChildren(children) {
-          for (const [childKey, childVal] of Object.entries(children || {})) {
-            // Page requests can repeat an already displayed key: don't duplicate it.
-            const childId = childVal && childVal.__fullname ? childVal.__fullname : childKey;
-            if (seen.has(childId)) {
-                continue;
-            }
-            seen.add(childId);
-            content.appendChild(window.renderVarNode(childKey, childVal, depth + 1));
-            loaded++;
-          }
-        }
-        function updateMore() {
-          if (moreButton) {
-              moreButton.remove();
-          }
-          moreButton = null;
-          if (next === null || next === undefined || !fullname) {
-              return;
-          }
-          moreButton = make('button', 'dbg-load-more',
-            loaded ? 'Загрузить ещё (' + loaded + ' из ' + total + ')' : 'Загрузить элементы (' + total + ')');
-          moreButton.type = 'button';
-          moreButton.style.cssText = 'margin:6px 0;padding:4px 8px;cursor:pointer';
-          moreButton.addEventListener('click', async e => {
-            e.preventDefault(); e.stopPropagation();
-            if (busy) {
-                return;
-            }
-            busy = true; moreButton.disabled = true;
-            const page = next;
-            try {
-              const result = await request(page, 4096);
-              appendChildren(result.__children);
-              next = result.__next_page;
-              if (page === next) {
-                  next = null; // prevent endless retries on invalid engine responses
-              }
-              updateMore();
-            } catch (err) {
-              moreButton.disabled = false;
-              moreButton.textContent = 'Повторить: ' + err.message;
-            } finally { 
-                busy = false; 
-            }
-          });
-          content.appendChild(moreButton);
-        }
-        details.addEventListener('toggle', () => {
-          if (!details.open || initialized) {
-              return;
-          }
-          initialized = true;
-          appendChildren(value.__children);
-          updateMore();
-        });
-      } else {
-        // Long scalar values are requested only when the user opens them.
-        let bytes = Math.min(65536, Number(window.__DBG_PROPERTY_MAX_DATA) || (4 * 1024 * 1024));
-        const initialValue = value.__value;
-        const output = make('pre', 'var-scalar', initialValue === undefined ? '' : initialValue);
-        output.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto';
-        const load = make('button', 'dbg-load-full', 'Показать значение');
-        load.type = 'button';
-        load.style.cssText = 'margin:6px 0;padding:4px 8px;cursor:pointer';
-        content.appendChild(output);
-        if (value.__lazy_value && fullname) {
-            content.appendChild(load);
-        }
-        async function fetchValue() {
-          if (busy) {
-              return;
-          }
-          busy = true;
-          load.disabled = true;
-          try {
-            const result = await request(0, bytes);
-            output.textContent = result.__value === undefined ? '' : result.__value;
-            if (result.__truncated) {
-              const maxBytes = Number(window.__DBG_PROPERTY_MAX_DATA) || (4 * 1024 * 1024);
-              if (bytes < maxBytes) {
-                bytes = Math.min(bytes * 4, maxBytes);
-                load.textContent = 'Загрузить больше (до ' + Math.round(bytes / 1024) + ' КБ)';
-                load.disabled = false;
-              } else {
-                load.textContent = 'Часть значения; увеличьте DBG_PROPERTY_MAX_DATA';
-                load.disabled = true;
-              }
-            } else { load.remove(); }
-          } catch (err) {
-            load.textContent = 'Повторить: ' + err.message;
-            load.disabled = false;
-          } finally { 
-              busy = false; 
-          }
-        }
-        load.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fetchValue(); });
-        details.addEventListener('toggle', () => {
-          if (!initialized && details.open) {
-            initialized = true;
-            if (value.__lazy_value && fullname) {
-                fetchValue();
-            }
-          }
-        });
-      }
-      return root;
-    };
-    // The initial render may have used the old renderer before DOMContentLoaded.
-    for (const id of ['vars-locals', 'vars-super']) {
-      const el = document.getElementById(id);
-      if (el) {
-          el.__lastSig = null;
-      }
-    }
-    if (typeof window.refresh === 'function') {
-        window.refresh();
-    }
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', enableVariableInspector, {once: true});
-  } else { 
-      enableVariableInspector(); 
-  }
-})();
-JS;
-}
-
 function render_template() {
 	static $body = null, $mtime = null;
 	$file = __DIR__ . '/index.tpl.php';
@@ -736,15 +549,6 @@ function render_template() {
 		dlog('template failed', ['error' => $e->getMessage()]);
 		return null;
 	}
-	// Keep the old template/frontend working: enhance its variable renderer
-	// without requiring index.tpl.php to be edited.
-	$inspector = '<script>window.__DBG_PROPERTY_MAX_DATA=' .
-		cfg_limit('DBG_PROPERTY_MAX_DATA', 4 * 1024 * 1024) . ';' .
-		inspector_frontend_js() . '</script>';
-	$endBody = strripos($body, '</body>');
-	$body = $endBody === false
-		? $body . $inspector
-		: substr_replace($body, $inspector, $endBody, 0);
 	$mtime = $newMtime;
 	return $body;
 }
@@ -841,7 +645,7 @@ function dbg_disconnect($reason = 'closed') {
 	log_disconnect($reason);
 }
 
-function dbg_queue($command, array $args = [], $callback = null, $resume = false): bool {
+function dbg_queue($command, array $args = [], $callback = null, $resume = false, $data = null): bool {
 	global $state;
 	if (!$state['dbg']) {
 		return false;
@@ -853,7 +657,8 @@ function dbg_queue($command, array $args = [], $callback = null, $resume = false
 		'command' => $command,
 		'args' => $args,
 		'callback' => $callback,
-		'resume' => $resume
+		'resume' => $resume,
+		'data' => $data
 	];
 	dbg_pump();
 	return true;
@@ -878,6 +683,11 @@ function dbg_pump() {
 			: dbgp_arg($val);
 		$line .= ' -' . $key . ' ' . $enc;
 	}
+
+	if ($item['data'] !== null) {
+		$line .= ' -- ' . base64_encode($item['data']);
+	}
+
 	$state['tx'] .= $line . "\0";
 	$state['inflight'] = $item + [
 			'txn' => $txn,
@@ -889,52 +699,120 @@ function dbg_pump() {
 	}
 }
 
+/**
+ * Synchronize all desired breakpoints with Xdebug when it is paused.
+ * A breakpoint is identified by file and line in the UI. Changing its
+ * condition replaces the old DBGp breakpoint rather than duplicating it.
+ */
 function dbg_sync_bps() {
 	global $state;
 	// Caller must only sync in starting/break state. During run, changes are staged.
 	if (!in_array($state['status'], ['starting', 'break'], true)) {
 		return;
 	}
-	foreach ($state['applied_bps'] as $key => $value) {
-		if (isset($state['desired_bps'][$key])) {
+
+	foreach ($state['applied_bps'] as $key => $applied) {
+		$desired = $state['desired_bps'][$key] ?? null;
+		$matches = $desired !== null &&
+			$applied['condition'] === ($desired['condition'] ?? '');
+
+		if ($matches) {
 			continue;
 		}
+
+		// If the engine has not yet answered breakpoint_set, its callback
+		// will compare conditions and discard the obsolete breakpoint.
+		if ($applied['pending']) {
+			continue;
+		}
+
 		unset($state['applied_bps'][$key]);
-		if ($value !== null) {
-			dbg_queue('breakpoint_remove', ['d' => $value]);
+		if ($applied['id'] !== null) {
+			dbg_queue('breakpoint_remove', ['d' => $applied['id']]);
 		}
 	}
+
 	foreach ($state['desired_bps'] as $key => $bp) {
 		if (array_key_exists($key, $state['applied_bps'])) {
 			continue;
 		}
-		$state['applied_bps'][$key] = null; // queued
+
+		$condition = $bp['condition'] ?? '';
 		$generation = $state['generation'];
-		dbg_queue('breakpoint_set', [
-			't' => 'line',
+		$state['applied_bps'][$key] = [
+			'id' => null,
+			'condition' => $condition,
+			'pending' => true,
+			'error' => null
+		];
+
+		$args = [
+			't' => $condition === '' ? 'line' : 'conditional',
 			'f' => $bp['uri'],
 			'n' => $bp['line']
-		],
-			function ($xml) use ($generation, $key) {
+		];
+
+		$enqueued = dbg_queue(
+			'breakpoint_set',
+			$args,
+			function ($xml) use ($generation, $key, $condition) {
 				global $state;
+
 				if ($generation !== $state['generation']) {
 					return;
 				}
+
 				$id = null;
-				if ($xml !== false && $xml !== null && isset($xml['id'])) {
+				$error = null;
+
+				if ($xml !== false && $xml !== null && !isset($xml->error) && isset($xml['id'])) {
 					$id = (string)$xml['id'];
+				} elseif ($xml !== false && $xml !== null && isset($xml->error)) {
+					$error = (string)($xml->error->message ?? 'Xdebug rejected breakpoint');
+				} else {
+					$error = 'Xdebug did not return a breakpoint ID';
 				}
-				if (isset($state['desired_bps'][$key])) {
+
+				$desired = $state['desired_bps'][$key] ?? null;
+				$stillWanted = $desired !== null &&
+					($desired['condition'] ?? '') === $condition;
+
+				if (!$stillWanted) {
+					// An outdated set command may finish after an edit or removal.
+					unset($state['applied_bps'][$key]);
+
 					if ($id !== null && $id !== '') {
-						$state['applied_bps'][$key] = $id;
+						dbg_queue('breakpoint_remove', ['d' => $id]);
 					}
-					else {
-						unset($state['applied_bps'][$key]);
-					}
-				} elseif ($id) {
-					dbg_queue('breakpoint_remove', ['d' => $id]);
+
+					dbg_sync_bps();
+					return;
 				}
-			});
+
+				if (!isset($state['applied_bps'][$key])) {
+					return;
+				}
+
+				$state['applied_bps'][$key]['pending'] = false;
+				if ($id !== null && $id !== '') {
+					$state['applied_bps'][$key]['id'] = $id;
+				} else {
+					$state['applied_bps'][$key]['error'] = $error;
+					dlog('DBGp breakpoint rejected', [
+						'site' => $key,
+						'condition' => $condition,
+						'error' => $error
+					]);
+				}
+			},
+			false,
+			$condition === '' ? null : $condition
+		);
+
+		if (!$enqueued) {
+			$state['applied_bps'][$key]['pending'] = false;
+			$state['applied_bps'][$key]['error'] = 'DBGp command queue full';
+		}
 	}
 }
 
@@ -980,10 +858,12 @@ function dbg_init_session($xml) {
 		['show_hidden', 1],
 		['resolved_breakpoints', 1],
 	];
-	foreach ($features as $feature) dbg_queue('feature_set', [
-		'n' => $feature[0],
-		'v' => $feature[1]
-	]);
+	foreach ($features as $feature) {
+		dbg_queue('feature_set', [
+			'n' => $feature[0],
+			'v' => $feature[1]
+		]);
+	}
 	dbg_resume('run');
 	dlog('DBGp attached', ['fileuri' => (string)($xml['fileuri'] ?? '')]);
 }
@@ -1124,7 +1004,9 @@ function dbg_packet($text) {
 	if ($inflight['resume'] && $status === 'break') {
 		dbg_sync_bps();
 		global $stackWaiters;
-		if ($stackWaiters) dbg_collect_snapshot();
+		if ($stackWaiters) {
+			dbg_collect_snapshot();
+		}
 	}
 	// In DBGp 'stopping' is a protocol state, not yet a disconnected request.
 	// Xdebug expects a final stop command to free the PHP worker.
@@ -1180,7 +1062,9 @@ function dbg_read() {
 	global $state;
 	$chunk = @fread($state['dbg'], 65536);
 	if ($chunk === false || $chunk === '') {
-		if ($chunk === false || feof($state['dbg'])) dbg_disconnect('eof');
+		if ($chunk === false || feof($state['dbg'])) {
+			dbg_disconnect('eof');
+		}
 		return;
 	}
 	$state['rx'] .= $chunk;
@@ -1270,8 +1154,11 @@ function handle_http($id, $request) {
 
 	if ($path === '/' || $path === '/index.tpl.php') {
 		$html = render_template();
-		if ($html === null) http_json($id, ['error' => 'index.tpl.php missing'], 500);
-		else http_response($id, 200, $method === 'HEAD' ? '' : $html, 'text/html; charset=utf-8');
+		if ($html === null) {
+			http_json($id, ['error' => 'index.tpl.php missing'], 500);
+		} else {
+			http_response($id, 200, $method === 'HEAD' ? '' : $html, 'text/html; charset=utf-8');
+		}
 		return;
 	}
 	if (serve_static($id, $path)) {
@@ -1289,12 +1176,21 @@ function handle_http($id, $request) {
 	if ($path === '/api/status') {
 		http_json($id, [
 			'attached' => (bool)$state['dbg'],
-			'engine_status' => $state['dbg'] ? $state['status'] : null
+			'engine_status' => $state['dbg'] ? $state['status'] : null,
+			'property_max_data' => cfg_limit('DBG_PROPERTY_MAX_DATA', 4 * 1024 * 1024)
 		]);
 		return;
 	}
 	if ($path === '/api/bp/list') {
-		http_json($id, ['desired' => array_values($state['desired_bps'])]);
+		$desired = [];
+		foreach ($state['desired_bps'] as $key => $bp) {
+			$applied = $state['applied_bps'][$key] ?? null;
+			$bp['engine_id'] = $applied === null ? null : $applied['id'];
+			$bp['engine_error'] = $applied === null ? null : $applied['error'];
+			$desired[] = $bp;
+		}
+
+		http_json($id, ['desired' => $desired]);
 		return;
 	}
 	if ($path === '/api/bp/set') {
@@ -1320,12 +1216,35 @@ function handle_http($id, $request) {
 			], 429);
 			return;
 		}
+		$condition = $params['condition'] ?? '';
+		if (!is_string($condition)) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'condition must be a string'
+			], 400);
+			return;
+		}
+
+		$condition = trim($condition);
+		if (strlen($condition) > 4096 || strpos($condition, "\0") !== false) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'invalid breakpoint condition'
+			], 400);
+			return;
+		}
+
+		$bp['condition'] = $condition;
 		$state['desired_bps'][$key] = $bp;
 		dbg_sync_bps();
+
+		$applied = $state['applied_bps'][$key] ?? null;
 		http_json($id, [
 			'ok' => true,
-			'id' => $state['applied_bps'][$key] ?? null,
-			'staged' => true
+			'id' => $applied === null ? null : $applied['id'],
+			'condition' => $condition,
+			'staged' => $applied === null || $applied['pending'],
+			'error' => $applied === null ? null : $applied['error']
 		]);
 		return;
 	}

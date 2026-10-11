@@ -43,8 +43,12 @@ async function api(p) {
 let $autoContinueCount = 0;
 const urlParams = new URLSearchParams(window.location.search);
 const skipParams = new URLSearchParams();
-for (const v of urlParams.getAll('skip')) skipParams.append('skip', v);
-for (const v of urlParams.getAll('skip[]')) skipParams.append('skip[]', v);
+for (const v of urlParams.getAll('skip')) {
+    skipParams.append('skip', v);
+}
+for (const v of urlParams.getAll('skip[]')) {
+    skipParams.append('skip[]', v);
+}
 const STACK_SKIP_QS = skipParams.toString() ? ('?' + skipParams.toString()) : '';
 let refreshTimeout = null;
 
@@ -55,6 +59,7 @@ async function refresh() {
             refreshTimeout = null;
         }
         const s = await api('/dbg/api/status');
+        window.__DBG_PROPERTY_MAX_DATA = Number(s.property_max_data) || (4 * 1024 * 1024);
         document.getElementById('status').textContent = s.attached ? ('attached / ' + (s.engine_status || 'unknown')) : 'waiting…';
 
         if (s.attached && s.engine_status === 'stopping') {
@@ -88,11 +93,42 @@ async function refresh() {
     }
 }
 
-document.getElementById('bpForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const f = new FormData(e.target);
-    await api('/dbg/api/bp/set?file=' + encodeURIComponent(f.get('file')) + '&line=' + encodeURIComponent(f.get('line')));
-    await refresh();
+document.getElementById('bpForm').onsubmit = async (event) => {
+    event.preventDefault();
+
+    const form = new FormData(event.target);
+    const params = new URLSearchParams();
+    const message = document.getElementById('bp-message');
+
+    params.set('file', form.get('file'));
+    params.set('condition', form.get('condition') || '');
+
+    if (form.get('line')) {
+        params.set('line', form.get('line'));
+    }
+
+    message.textContent = '';
+
+    try {
+        const response = await fetch('/dbg/api/bp/set?' + params.toString(), {
+            cache: 'no-store'
+        });
+        const result = await response.json();
+
+        if (!response.ok || !result.ok) {
+            throw new Error(result.error || 'Breakpoint was not saved');
+        }
+
+        if (result.error) {
+            message.textContent = 'Xdebug: ' + result.error;
+        } else {
+            message.textContent = result.condition ? 'Conditional breakpoint saved.' : 'Breakpoint saved.';
+        }
+
+        await refresh();
+    } catch (error) {
+        message.textContent = 'Ошибка: ' + error.message;
+    }
 };
 document.getElementById('btnList').onclick = () => api('/dbg/api/bp/list').then(x => alert(JSON.stringify(x, null, 2)));
 document.getElementById('btnClear').onclick = () => api('/dbg/api/bp/clear').then(refresh);
@@ -126,7 +162,9 @@ let __lastStackSig = null;
 function renderStack(st) {
     const el = document.getElementById('stack-body');
     const view = (() => {
-        if (!st || typeof st !== 'object') return st;
+        if (!st || typeof st !== 'object') {
+            return st;
+        }
 
         const v = {
             status: st.status,
@@ -142,7 +180,9 @@ function renderStack(st) {
     })();
 
     const sig = stableSig(view);
-    if (sig === __lastStackSig) return;
+    if (sig === __lastStackSig) {
+        return;
+    }
     __lastStackSig = sig;
 
     el.textContent = JSON.stringify(view, null, 2);
@@ -268,7 +308,9 @@ function renderVarTree(rootEl, dataObj) {
     }
 
     const sig = stableSig(dataObj);
-    if (rootEl.__lastSig === sig) return;
+    if (rootEl.__lastSig === sig) {
+        return;
+    }
     rootEl.__lastSig = sig;
 
     rootEl.className = 'var-tree';
@@ -284,11 +326,17 @@ function renderVarTree(rootEl, dataObj) {
 
 function stableSig(obj) {
     function norm(x) {
-        if (x === null || typeof x !== 'object') return x;
-        if (Array.isArray(x)) return x.map(norm);
+        if (x === null || typeof x !== 'object') {
+            return x;
+        }
+        if (Array.isArray(x)) {
+            return x.map(norm);
+        }
         const keys = Object.keys(x).sort();
         const y = {};
-        for (let k of keys) y[k] = norm(x[k]);
+        for (let k of keys) {
+            y[k] = norm(x[k]);
+        }
         return y;
     }
 

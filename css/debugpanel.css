@@ -216,3 +216,10 @@ summary {
     left: 2px;
     transition: left 0.3s;
 }
+
+.condition {
+    margin-top:8px;
+    margin-bottom:8px;
+    display: flex;
+    flex-direction: column;
+}
