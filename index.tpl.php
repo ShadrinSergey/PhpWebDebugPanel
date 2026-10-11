@@ -11,9 +11,6 @@
     <label for="bp-filename">
         <input id="bp-filename" name="file" placeholder="/var/www/html/index.php:3" size="120" required>
     </label>
-    <label>
-        <input name="line" type="number" placeholder="5" min="1">
-    </label>
     <button id="set-bp">Set breakpoint</button>
     <button type="button" id="btnList">List</button>
     <button type="button" id="btnClear">Clear all</button>

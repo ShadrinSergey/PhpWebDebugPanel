@@ -1,33 +1,43 @@
 <?php
 
+/**
+ * @var $DBG_HOST
+ *   Server IP for xdebug.
+ * @var $DBG_PORT
+ *   Server port for xdebug.
+ * @var $HTTP_HOST
+ *   Site IP for service.
+ * @var $HTTP_PORT
+ *   Site port for service.
+ */
+
 error_reporting(E_ALL);
 set_time_limit(0);
 
 require_once('config.php');
 
+if (!function_exists('simplexml_load_string')) {
+	fwrite(STDERR, "PHP extension simplexml is required for DBGp XML packets\n");
+	exit(1);
+}
+
 function dlog($msg, array $ctx = []) {
-	if (DBG_LOG_ENABLED) {
-		$ts = date('Y-m-d H:i:s');
-		$pid = getmypid();
-		if (!empty($ctx)) {
-			$ctx = json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-			$line = "[$ts][$pid] $msg | $ctx\n";
-		} else {
-			$line = "[$ts][$pid] $msg\n";
-		}
-		@file_put_contents(DBG_LOG_FILE, $line, FILE_APPEND);
-		@error_log($line);
+	if (!defined('DBG_LOG_ENABLED') || !DBG_LOG_ENABLED) {
+		return;
+	}
+	$suffix = $ctx ? ' | ' . json_encode($ctx, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
+	$line = '[' . date('Y-m-d H:i:s') . '][' . getmypid() . '] ' . $msg . $suffix . "\n";
+	if (defined('DBG_LOG_FILE') && DBG_LOG_FILE !== '') {
+		@file_put_contents(DBG_LOG_FILE, $line, FILE_APPEND | LOCK_EX);
+	} else {
+		@error_log(trim($line));
 	}
 }
 
-function starts_with($h, $n) {
-	return strpos($h, $n) === 0;
-}
-
 /**
- * Кодирование значения аргумента DBGp (URL-style).
+ * Encoding the DBGp argument value (URL-style).
  */
-function dbgp_arg($v) {
+function dbgp_arg($v): string {
 	$enc = rawurlencode($v);
 	return strtr($enc, [
 		'%2F' => '/',
@@ -44,49 +54,31 @@ function dbgp_arg($v) {
 	]);
 }
 
-function dbgp_arg_fullname($v) {
-	$enc = rawurlencode($v);
-	return strtr($enc, [
-		'%24' => '$',
-		'%5B' => '[',
-		'%5D' => ']',
-		'%27' => "'",
-		'%22' => '"',
-	]);
-}
-
 function path_to_file_uri($path) {
-	if (strpos($path, 'file://') === 0) return $path;
+	if (strpos($path, 'file://') === 0) {
+		return $path;
+	}
 	if (preg_match('#^[A-Za-z]:\\\\#', $path)) {
 		$path = str_replace('\\', '/', $path);
 		return 'file:///' . $path;
 	}
-	if ($path !== '' && $path[0] === '/') return 'file://' . $path;
+	if ($path !== '' && $path[0] === '/') {
+		return 'file://' . $path;
+	}
 	return $path;
 }
 
-function normalize_file_uri($s) {
-	if (!$s) return '';
-	return (strpos($s, 'file://') === 0) ? $s : path_to_file_uri($s);
-}
-
-function is_our_break(array $frames, array $desired_bps): bool {
-	if (empty($frames)) return false;
-	$top = $frames[0];
-	$uri = normalize_file_uri($top['file'] ?? '');
-	$line = (int)($top['line'] ?? 0);
-	foreach ($desired_bps as $bp) {
-		$bp_uri = normalize_file_uri($bp['uri'] ?? $bp['file'] ?? '');
-		if ($bp_uri && $bp_uri === $uri && (int)$bp['line'] === $line) return true;
-	}
-	return false;
-}
-
 function file_uri_to_path($uri) {
-	if (!$uri) return '';
-	if (strpos($uri, 'file://') !== 0) return $uri;
+	if (!$uri) {
+		return '';
+	}
+	if (strpos($uri, 'file://') !== 0) {
+		return $uri;
+	}
 	$p = substr($uri, 7);
-	if (preg_match('#^/[A-Za-z]:/#', $p)) $p = substr($p, 1);
+	if (preg_match('#^/[A-Za-z]:/#', $p)) {
+		$p = substr($p, 1);
+	}
 	return str_replace("\\", "/", $p);
 }
 
@@ -94,7 +86,7 @@ function normalize_slashes($p) {
 	return preg_replace('~\\\\+~', '/', (string)$p);
 }
 
-function parse_file_ref_and_map($raw, $q_line = 0) {
+function parse_file_ref_and_map($raw, $q_line = 0): array {
 	global $DBG_PROJECT_BASE, $DBG_SERVER_BASE;
 
 	$s = trim((string)$raw);
@@ -106,7 +98,11 @@ function parse_file_ref_and_map($raw, $q_line = 0) {
 			$path = $m[1];
 			$line = (int)$m[2];
 		}
-		return ['file' => $path, 'uri' => path_to_file_uri($path), 'line' => $line];
+		return [
+			'file' => $path,
+			'uri' => path_to_file_uri($path),
+			'line' => $line
+		];
 	}
 
 	if (preg_match('/^(.*?):(\d+)\s*$/', $s, $m)) {
@@ -117,11 +113,19 @@ function parse_file_ref_and_map($raw, $q_line = 0) {
 	$path = normalize_slashes($s);
 
 	if ($path !== '' && $path[0] === '/') {
-		return ['file' => $path, 'uri' => path_to_file_uri($path), 'line' => $line];
+		return [
+			'file' => $path,
+			'uri' => path_to_file_uri($path),
+			'line' => $line
+		];
 	}
 
 	if (preg_match('#^[A-Za-z]:/#', $path)) {
-		return ['file' => $path, 'uri' => path_to_file_uri($path), 'line' => $line];
+		return [
+			'file' => $path,
+			'uri' => path_to_file_uri($path),
+			'line' => $line
+		];
 	}
 
 	$rel = $path;
@@ -145,257 +149,103 @@ function parse_file_ref_and_map($raw, $q_line = 0) {
 	return ['file' => $path, 'uri' => path_to_file_uri($path), 'line' => $line];
 }
 
-function dbg_html_escape($s) {
+function dbg_html_escape($s): string {
 	return htmlspecialchars($s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
 /**
- * Читает файл и возвращает список строк для рендера вокруг $line.
- *
- * @return array{ok:bool, file:string, start:int, end:int, line:int, lines:array<int,array{no:int,cur:bool,text:string}>, error?:string}
+ * Read only a small source window, never the whole source file into memory.
  */
-function read_source_context($file_or_uri, $line, $above = 10, $below = 10) {
+function read_source_context($file_or_uri, $line, $above = 10, $below = 10): array {
 	$path = file_uri_to_path($file_or_uri);
-	if ($path === '' || !is_readable($path)) {
-		return [
-			'ok' => false,
-			'file' => $path,
-			'line' => $line,
-			'start' => 0,
-			'end' => 0,
-			'lines' => [],
-			'error' => 'file not readable'
-		];
+	$line = max(1, (int)$line);
+	$above = min(20, max(0, (int)$above));
+	$below = min(20, max(0, (int)$below));
+	$failure = [
+		'ok' => false,
+		'file' => $path,
+		'line' => $line,
+		'start' => 0,
+		'end' => 0,
+		'lines' => [],
+		'error' => 'file not readable'
+	];
+	if (!$path || !is_readable($path) || !is_file($path)) {
+		return $failure;
 	}
-	$all = @file($path, FILE_IGNORE_NEW_LINES);
-	if ($all === false) {
-		return [
-			'ok' => false,
-			'file' => $path,
-			'line' => $line,
-			'start' => 0,
-			'end' => 0,
-			'lines' => [],
-			'error' => 'failed to read'
-		];
+	$fh = @fopen($path, 'rb');
+	if (!$fh) {
+		return $failure;
 	}
-	$n = count($all);
-	$line = max(1, min((int)$line, $n));
 	$start = max(1, $line - $above);
-	$end = min($n, $line + $below);
-
+	$end = $line + $below;
 	$out = [];
-	for ($i = $start; $i <= $end; $i++) {
-		$raw = $all[$i - 1];
-		$out[] = ['no' => $i, 'cur' => ($i === $line), 'text' => dbg_html_escape($raw)];
-	}
-	return ['ok' => true, 'file' => $path, 'line' => $line, 'start' => $start, 'end' => $end, 'lines' => $out];
-}
-
-function dbgp_read_packet($sock, $timeout_sec = 3.0) {
-	dlog("dbgp_read_packet: wait", ['timeout' => $timeout_sec]);
-
-	$r = [$sock];
-	$w = $e = null;
-	if (stream_select($r, $w, $e, (int)$timeout_sec, (int)(($timeout_sec - (int)$timeout_sec) * 1e6)) === 0) {
-		dlog("dbgp_read_packet: timeout");
-		return null;
-	}
-	$len = '';
-	while (!feof($sock)) {
-		$c = fgetc($sock);
-		if ($c === false) {
-			dlog("dbgp_read_packet: fgetc=false");
-			return null;
-		}
-		if ($c === "\0") break;
-		$len .= $c;
-		if (strlen($len) > 12) {
-			dlog("dbgp_read_packet: bad length header", ['len' => $len]);
-			return null;
-		}
-	}
-	if ($len === '' || !ctype_digit($len)) {
-		dlog("dbgp_read_packet: invalid length", ['len' => $len]);
-		return null;
-	}
-	$to = (int)$len;
-	$payload = '';
-	while ($to > 0 && !feof($sock)) {
-		$chunk = fread($sock, $to);
-		if ($chunk === false) break;
-		$payload .= $chunk;
-		$to -= strlen($chunk);
-	}
-	fgetc($sock);
-
-	dlog("dbgp_read_packet: got", ['len' => $len, 'head' => substr($payload, 0, 200)]);
-	return $payload;
-}
-
-function dbgp_cmd_safe($sock, $cmd, $args = [], $data = '', $timeout_sec = 3.0, $retries = 1) {
-	static $txn = 0;
-	$txn = $txn % 1000000;
-	do {
-		$txn++;
-		$argStr = '';
-		foreach ($args as $k => $v) {
-			if ($cmd === 'property_get' && $k === 'n') {
-				$argStr .= ' -' . $k . ' ' . dbgp_arg_fullname($v);
-			} else {
-				$argStr .= ' -' . $k . ' ' . dbgp_arg($v);
+	$i = 0;
+	// Cap source scanning to prevent a malformed URI/line from monopolizing the event loop.
+	$maxScan = cfg_limit('DBG_MAX_SOURCE_SCAN_LINES', 20000);
+	$maxBytes = cfg_limit('DBG_MAX_SOURCE_SCAN_BYTES', 4 * 1024 * 1024);
+	$bytesRead = 0;
+	while (!feof($fh) && $i < $end && $i < $maxScan && $bytesRead < $maxBytes) {
+		$raw = '';
+		$got = false;
+		do {
+			$chunk = fgets($fh, 8192);
+			if ($chunk === false) {
+				break;
 			}
-		}
-		$line = $cmd . ' -i ' . $txn . $argStr;
-		@fwrite($sock, $line . "\0");
-
-		if ($cmd === 'property_get' && isset($args['n'])) {
-			dlog('DBGp send property_get', ['n_raw' => (string)$args['n'], 'line' => $line]);
-		}
-
-		$resp = dbgp_read_packet($sock, $timeout_sec);
-		if ($resp !== null) {
-			if (strpos($resp, '<response') === false) {
-				$maybe = dbgp_read_packet($sock, $timeout_sec);
-				if ($maybe !== null) $resp = $maybe;
+			$bytesRead += strlen($chunk);
+			$got = true;
+			if (strlen($raw) < 4096) {
+				$raw .= substr($chunk, 0, 4096 - strlen($raw));
 			}
-			if ($resp !== null) return @simplexml_load_string($resp) ?: null;
+		} while (strpos($chunk, "\n") === false && !feof($fh) && $bytesRead < $maxBytes);
+		if (!$got) {
+			break;
 		}
-	} while ($retries-- > 0);
-	return null;
-}
-
-function prop_scalar_or_summary(SimpleXMLElement $p) {
-	$type = isset($p['type']) ? (string)$p['type'] : '';
-	$size = isset($p['size']) ? (int)$p['size'] : null;
-	$max_preview_size = 8192;
-
-	if ($type === 'string' && $size !== null && $size > $max_preview_size) {
-		return 'string(' . $size . ')';
-	}
-
-	if (isset($p['value'])) {
-		return (string)$p['value'];
-	}
-
-	if (isset($p->value)) {
-		$v = $p->value;
-		$raw = (string)$v;
-		$enc = isset($v['encoding']) ? strtolower((string)$v['encoding']) : '';
-		if ($enc === 'base64') {
-			$size = strlen($raw);
-			if ($size > $max_preview_size * 2) {
-				return 'string(' . $size . ')';
-			}
-			$decoded = base64_decode($raw, true);
-			if ($decoded !== false) {
-				return $decoded;
-			}
-		}
-
-		$txt = trim($raw);
-		if ($txt !== '') {
-			return $txt;
-		}
-	}
-
-	// Fallback.
-	if (isset($p['encoding']) && strtolower((string)$p['encoding']) === 'base64') {
-		$raw = base64_decode((string)$p, true);
-		$size = strlen($raw);
-		if ($size > $max_preview_size * 2) {
-			return 'string(' . $size . ')';
-		}
-		return $raw !== false ? $raw : '';
-	}
-
-	$txt = trim((string)$p);
-	if ($txt !== '') {
-		return $txt;
-	}
-
-	$children = isset($p['children']) ? (int)$p['children'] : 0;
-	if ($children === 1) {
-		$t = isset($p['type']) ? (string)$p['type'] : 'array';
-		$n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
-		return $t . '(' . $n . ')';
-	}
-
-	return '';
-}
-
-
-function prop_tree_from_property(SimpleXMLElement $p, $sock, int $ctx_id, int $depth_left, int $max_children = 64) {
-	$type = isset($p['type']) ? (string)$p['type'] : '';
-	if ($type === 'resource') {
-		return prop_scalar_or_summary($p);
-	}
-
-	if ($type === 'array') {
-		$numchildren = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
-		if ($numchildren > $max_children * 4) {
-			return [
-				'__type' => $type,
-				'__summary' => $type . '(' . $numchildren . ')',
+		$i++;
+		if ($i >= $start) {
+			$out[] = [
+				'no' => $i,
+				'cur' => ($i === $line),
+				'text' => dbg_html_escape(rtrim($raw, "\r\n")),
 			];
 		}
 	}
-
-	$val = prop_scalar_or_summary($p);
-	$has_children = isset($p['children']) && (int)$p['children'] === 1;
-	$fullname = prop_fullname($p);
-
-	if (!$has_children) {
-		if ($val === '' && $fullname !== '') {
-			$resp = dbgp_cmd_safe($sock, 'property_get', [
-				'n' => $fullname, 'd' => 0, 'c' => $ctx_id
-			], '', 2.0, 1);
-			if ($resp && isset($resp->property)) {
-				$val = prop_scalar_or_summary($resp->property);
-			}
-		}
-		return $val;
+	fclose($fh);
+	if ($i < $line) {
+		return [
+			'ok' => false,
+			'file' => $path,
+			'line' => $line,
+			'start' => 0,
+			'end' => 0,
+			'lines' => [],
+			'error' => ($i >= $maxScan || $bytesRead >= $maxBytes)
+				? 'source scan limit exceeded' : 'line beyond end of file'
+		];
 	}
+	return [
+		'ok' => true,
+		'file' => $path,
+		'line' => $line,
+		'start' => $out ? $out[0]['no'] : 0,
+		'end' => $out ? $out[count($out) - 1]['no'] : 0,
+		'lines' => $out
+	];
+}
 
-	$type = isset($p['type']) ? (string)$p['type'] : 'array';
-	$out = ['__type' => $type, '__children' => []];
-
-	if ($depth_left <= 0) {
-		$n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
-		$out['__summary'] = $type . '(' . $n . ')';
-		return $out;
+/**
+ * Preserve the actual DBGp scalar value, including leading/trailing whitespace.
+ */
+function prop_scalar_or_summary(SimpleXMLElement $p): string {
+	$node = isset($p->value) ? $p->value : $p;
+	$raw = (string)$node;
+	$encoding = strtolower((string)($node['encoding'] ?? $p['encoding'] ?? ''));
+	if ($encoding === 'base64') {
+		$decoded = base64_decode($raw, true);
+		return $decoded !== false ? $decoded : '';
 	}
-
-	$childrenSource = null;
-
-	if (isset($p->property)) {
-		$childrenSource = $p->property;
-	} elseif ($fullname !== '') {
-		$resp = dbgp_cmd_safe($sock, 'property_get', [
-			'n' => $fullname,
-			'd' => 0,
-			'c' => $ctx_id
-		], '', 2.0, 1);
-
-		if ($resp && isset($resp->property->property)) {
-			$childrenSource = $resp->property->property;
-		}
-	}
-
-	if ($childrenSource) {
-		$i = 0;
-		foreach ($childrenSource as $child) {
-			if ($i++ >= $max_children) break;
-			$name = prop_name($child);
-			$out['__children'][$name] =
-				prop_tree_from_property($child, $sock, $ctx_id, $depth_left - 1, $max_children);
-		}
-	} else {
-		$n = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
-		$out['__summary'] = $type . '(' . $n . ')';
-	}
-
-	return $out;
+	return $raw;
 }
 
 function prop_fullname(SimpleXMLElement $p): string {
@@ -495,468 +345,1740 @@ function prop_name(SimpleXMLElement $p): string {
 	return '';
 }
 
-function collect_context_tree($sock, int $ctx_id, int $depth = 5, int $max_children = 64, array $skip = []) {
-	$vars = [];
-	$skipSet = [];
-	foreach ($skip as $s) {
-		$s = (string)$s;
-		if ($s === '') {
-			continue;
-		}
-		$skipSet[$s] = true;
-		if ($s[0] !== '$') {
-			$skipSet['$' . $s] = true;
-		}
-	}
-
-	$ctx = dbgp_cmd_safe($sock, 'context_get', ['d' => 0, 'c' => $ctx_id], '', 1.2, 1);
-	if ($ctx && isset($ctx->property)) {
-		foreach ($ctx->property as $p) {
-			$name = prop_name($p);
-			if (isset($skipSet[$name])) {
-				$type = isset($p['type']) ? (string)$p['type'] : 'array';
-				$numchildren = isset($p['numchildren']) ? (int)$p['numchildren'] : 0;
-				$vars[$name] = [
-					'__type' => $type,
-					'__summary' => $type . '(' . $numchildren . ')',
-				];
-				continue;
-			}
-
-			$vars[$name] = prop_tree_from_property($p, $sock, $ctx_id, $depth, $max_children);
-		}
-	}
-	return $vars;
+/**
+ * Only the *initial payload* is small; no variables are discarded.
+ * Large values and later array/object pages are fetched when opened in the UI.
+ */
+function cfg_limit($name, $default) {
+	return defined($name) ? max(1, (int)constant($name)) : $default;
 }
 
-$dbgSock = stream_socket_server("tcp://$DBG_HOST:$DBG_PORT", $e1, $e1s);
-if (!$dbgSock) die("DBGp listen error\n");
-stream_set_blocking($dbgSock, false);
+/**
+ * Convert a DBGp <property> into a browsable node with its full DBGp address.
+ */
+function property_tree(SimpleXMLElement $p, int $context, int $generation, int $depth = 0, bool $fullValue = false, int $requestedPage = 0) {
+	$type = (string)($p['type'] ?? '');
+	$fullname = prop_fullname($p);
+	$hasChildren = (int)($p['children'] ?? 0) === 1;
+	$base = [
+		'__type' => $type ?: 'unknown',
+		'__fullname' => $fullname,
+		'__context' => $context,
+		'__generation' => $generation,
+	];
+	if (!$hasChildren) {
+		$value = prop_scalar_or_summary($p);
+		$size = max(0, (int)($p['size'] ?? strlen($value)));
+		// Retain scalar compatibility: small values remain plain strings.
+		if (!$fullValue && $size <= 4096 && strlen($value) <= 4096) {
+			return $value;
+		}
+		$partial = $type === 'string' && $size > strlen($value);
+		$base['__size'] = $size;
+		$base['__summary'] = ($type ?: 'value') . ($type === 'string' ? '(' . $size . ')' : '');
+		$base['__value'] = $fullValue ? $value : substr($value, 0, 512);
+		$base['__truncated'] = $partial || (!$fullValue && strlen($value) > 512);
+		$base['__lazy_value'] = !$fullValue && $fullname !== '';
+		return $base;
+	}
 
-$httpSock = stream_socket_server("tcp://$HTTP_HOST:$HTTP_PORT", $e2, $e2s);
-if (!$httpSock) die("HTTP listen error\n");
+	$total = max(0, (int)($p['numchildren'] ?? 0));
+	$page = max(0, (int)($p['page'] ?? $requestedPage));
+	$pageSize = max(1, (int)($p['pagesize'] ?? cfg_limit('DBG_MAX_CHILDREN', 32)));
+	$base['__summary'] = ($type ?: 'array') . '(' . $total . ')';
+	$base['__numchildren'] = $total;
+	$base['__pagesize'] = $pageSize;
+	$base['__children'] = [];
+	$loaded = 0;
+	// context_get has only one level of children. A property_get response can
+	// contain another level; all deeper nodes remain individually expandable.
+	if ($depth < 1 && isset($p->property)) {
+		foreach ($p->property as $child) {
+			$name = prop_name($child);
+			if ($name === '') $name = '#' . ($loaded + 1 + $page * $pageSize);
+			// Avoid overwriting different properties with identical short names.
+			$key = $name;
+			$suffix = 2;
+			while (array_key_exists($key, $base['__children'])) {
+				$key = $name . ' #' . $suffix++;
+			}
+			$base['__children'][$key] = property_tree($child, $context, $generation, $depth + 1);
+			$loaded++;
+		}
+	}
+	// Not loading children here never makes them inaccessible: page 0 is
+	// retrieved with property_get when the user expands the node.
+	$base['__next_page'] = $total > 0 && ($loaded === 0 || ($page + 1) * $pageSize < $total)
+		? ($loaded === 0 ? $page : $page + 1) : null;
+	return $base;
+}
+
+function context_tree($xml, int $context, int $generation): array {
+	$result = [];
+	if ($xml === false || $xml === null || !isset($xml->property)) {
+		return $result;
+	}
+	foreach ($xml->property as $prop) {
+		$name = prop_name($prop);
+		if ($name === '') {
+			continue;
+		}
+		// Absolutely no global budget and no hard-coded $_SERVER/$_ENV/$GLOBALS skips.
+		$result[$name] = property_tree($prop, $context, $generation);
+	}
+	return $result;
+}
+
+function filtered_snapshot(array $snap, array $skip): array {
+	if (!$skip) {
+		return $snap;
+	}
+	$skipSet = [];
+	foreach (array_slice($skip, 0, 80) as $name) {
+		$name = trim((string)$name);
+		if ($name !== '') {
+			$skipSet[$name] = true;
+			$skipSet[ltrim($name, '$')] = true;
+			$skipSet['$' . ltrim($name, '$')] = true;
+		}
+	}
+	foreach (['locals', 'superglobals'] as $ctx) {
+		foreach ($snap[$ctx] ?? [] as $key => $value) {
+			if (!isset($skipSet[$key])) {
+				continue;
+			}
+			if (is_array($value) && isset($value['__type'])) {
+				$snap[$ctx][$key] = [
+					'__type' => $value['__type'],
+					'__summary' => $value['__summary'] ?? $value['__type'] . '(skipped)'
+				];
+			} else {
+				$snap[$ctx][$key] = [
+					'__type' => 'skipped',
+					'__summary' => 'skipped'
+				];
+			}
+		}
+	}
+	return $snap;
+}
+
+function log_disconnect($msg) {
+	dlog('DBGp disconnected', ['reason' => $msg]);
+}
+
+function http_close($id) {
+	global $httpClients, $stackWaitersBySite, $propertyWaitersBySite;
+
+	if (!isset($httpClients[$id])) {
+		return;
+	}
+
+	$site = $httpClients[$id]['site'];
+	@fclose($httpClients[$id]['sock']);
+	unset($httpClients[$id]);
+
+	if ($site !== null) {
+		unset($stackWaitersBySite[$site][$id]);
+		unset($propertyWaitersBySite[$site][$id]);
+	}
+}
+
+function http_response($id, $code, $body, $mime = 'application/json; charset=utf-8', $cache = false) {
+	global $httpClients;
+	if (!isset($httpClients[$id])) {
+		return;
+	}
+	$reasons = [
+		200 => 'OK',
+		400 => 'Bad Request',
+		421 => 'Misdirected Request',
+		404 => 'Not Found',
+		405 => 'Method Not Allowed',
+		409 => 'Conflict',
+		413 => 'Payload Too Large',
+		429 => 'Too Many Requests',
+		403 => 'Forbidden',
+		500 => 'Internal Server Error',
+		502 => 'Bad Gateway',
+		503 => 'Service Unavailable',
+		504 => 'Gateway Timeout'
+	];
+	$reason = $reasons[$code] ?? 'Error';
+	$header = "HTTP/1.1 $code $reason\r\nContent-Type: $mime\r\n"
+		. 'Content-Length: ' . strlen($body) . "\r\n"
+		. 'Cache-Control: ' . ($cache ? 'public, max-age=300' : 'no-store') . "\r\n"
+		. "X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
+	$httpClients[$id]['out'] = $header . $body;
+	$httpClients[$id]['waiting'] = false;
+	$httpClients[$id]['in'] = '';
+	$httpClients[$id]['deadline'] = microtime(true) + 5.0;
+}
+
+function http_json($id, $value, $status = 200) {
+	$str = json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR);
+	if ($str === false) {
+		$str = '{"error":"json encoding failed"}';
+		$status = 500;
+	}
+	if (strlen($str) > cfg_limit('DBG_MAX_HTTP_JSON_BYTES', 33554432)) {
+		$str = '{"error":"response too large; adjust DBG_MAX_HTTP_JSON_BYTES"}';
+		$status = 413;
+	}
+	http_response($id, $status, $str);
+}
+
+function inspector_frontend_js(): string {
+	return <<<'JS'
+(function () {
+  'use strict';
+  function enableVariableInspector() {
+    if (typeof window.renderVarNode !== 'function') {
+        return;
+    }
+    const original = window.renderVarNode;
+    const make = (tag, className, content) => {
+      const el = document.createElement(tag);
+      if (className) {
+          el.className = className;
+      }
+      if (content !== undefined) {
+          el.textContent = String(content);
+      }
+      return el;
+    };
+    function formatSummary(value) {
+      return value.__summary || (value.__type || 'value') +
+        (Number.isFinite(value.__numchildren) ? '(' + value.__numchildren + ')' : '');
+    }
+    window.renderVarNode = function (key, value, depth = 0) {
+      if (!value || typeof value !== 'object' || !('__type' in value)) {
+        return original(key, value, depth);
+      }
+      const root = make('div');
+      const details = make('details');
+      const sum = make('summary');
+      sum.appendChild(make('span', 'var-key', key));
+      sum.appendChild(document.createTextNode(': '));
+      sum.appendChild(make('span', 'var-type', value.__type));
+      sum.appendChild(document.createTextNode(' '));
+      sum.appendChild(make('span', 'var-summary', formatSummary(value)));
+      details.appendChild(sum);
+      const content = make('div');
+      details.appendChild(content);
+      root.appendChild(details);
+
+      const fullname = value.__fullname;
+      const request = async (page, maxData) => {
+        const qs = new URLSearchParams({
+          name: fullname, ctx: value.__context, generation: value.__generation,
+          page: page, max_data: maxData
+        });
+        const resp = await fetch('/dbg/api/property?' + qs.toString(), {cache: 'no-store'});
+        const body = await resp.json();
+        if (!resp.ok || !body.ok) {
+            throw new Error(body.error || 'Cannot fetch property');
+        }
+        return body.property;
+      };
+      let busy = false, initialized = false;
+      const total = Number(value.__numchildren) || 0;
+      const isContainer = value.__children && typeof value.__children === 'object';
+      if (isContainer) {
+        let loaded = 0;
+        let next = value.__next_page;
+        let moreButton = null;
+        const seen = new Set();
+        function appendChildren(children) {
+          for (const [childKey, childVal] of Object.entries(children || {})) {
+            // Page requests can repeat an already displayed key: don't duplicate it.
+            const childId = childVal && childVal.__fullname ? childVal.__fullname : childKey;
+            if (seen.has(childId)) {
+                continue;
+            }
+            seen.add(childId);
+            content.appendChild(window.renderVarNode(childKey, childVal, depth + 1));
+            loaded++;
+          }
+        }
+        function updateMore() {
+          if (moreButton) {
+              moreButton.remove();
+          }
+          moreButton = null;
+          if (next === null || next === undefined || !fullname) {
+              return;
+          }
+          moreButton = make('button', 'dbg-load-more',
+            loaded ? 'Загрузить ещё (' + loaded + ' из ' + total + ')' : 'Загрузить элементы (' + total + ')');
+          moreButton.type = 'button';
+          moreButton.style.cssText = 'margin:6px 0;padding:4px 8px;cursor:pointer';
+          moreButton.addEventListener('click', async e => {
+            e.preventDefault(); e.stopPropagation();
+            if (busy) {
+                return;
+            }
+            busy = true; moreButton.disabled = true;
+            const page = next;
+            try {
+              const result = await request(page, 4096);
+              appendChildren(result.__children);
+              next = result.__next_page;
+              if (page === next) {
+                  next = null; // prevent endless retries on invalid engine responses
+              }
+              updateMore();
+            } catch (err) {
+              moreButton.disabled = false;
+              moreButton.textContent = 'Повторить: ' + err.message;
+            } finally { 
+                busy = false; 
+            }
+          });
+          content.appendChild(moreButton);
+        }
+        details.addEventListener('toggle', () => {
+          if (!details.open || initialized) {
+              return;
+          }
+          initialized = true;
+          appendChildren(value.__children);
+          updateMore();
+        });
+      } else {
+        // Long scalar values are requested only when the user opens them.
+        let bytes = Math.min(65536, Number(window.__DBG_PROPERTY_MAX_DATA) || (4 * 1024 * 1024));
+        const initialValue = value.__value;
+        const output = make('pre', 'var-scalar', initialValue === undefined ? '' : initialValue);
+        output.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:50vh;overflow:auto';
+        const load = make('button', 'dbg-load-full', 'Показать значение');
+        load.type = 'button';
+        load.style.cssText = 'margin:6px 0;padding:4px 8px;cursor:pointer';
+        content.appendChild(output);
+        if (value.__lazy_value && fullname) {
+            content.appendChild(load);
+        }
+        async function fetchValue() {
+          if (busy) {
+              return;
+          }
+          busy = true;
+          load.disabled = true;
+          try {
+            const result = await request(0, bytes);
+            output.textContent = result.__value === undefined ? '' : result.__value;
+            if (result.__truncated) {
+              const maxBytes = Number(window.__DBG_PROPERTY_MAX_DATA) || (4 * 1024 * 1024);
+              if (bytes < maxBytes) {
+                bytes = Math.min(bytes * 4, maxBytes);
+                load.textContent = 'Загрузить больше (до ' + Math.round(bytes / 1024) + ' КБ)';
+                load.disabled = false;
+              } else {
+                load.textContent = 'Часть значения; увеличьте DBG_PROPERTY_MAX_DATA';
+                load.disabled = true;
+              }
+            } else { load.remove(); }
+          } catch (err) {
+            load.textContent = 'Повторить: ' + err.message;
+            load.disabled = false;
+          } finally { 
+              busy = false; 
+          }
+        }
+        load.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fetchValue(); });
+        details.addEventListener('toggle', () => {
+          if (!initialized && details.open) {
+            initialized = true;
+            if (value.__lazy_value && fullname) {
+                fetchValue();
+            }
+          }
+        });
+      }
+      return root;
+    };
+    // The initial render may have used the old renderer before DOMContentLoaded.
+    for (const id of ['vars-locals', 'vars-super']) {
+      const el = document.getElementById(id);
+      if (el) {
+          el.__lastSig = null;
+      }
+    }
+    if (typeof window.refresh === 'function') {
+        window.refresh();
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', enableVariableInspector, {once: true});
+  } else { 
+      enableVariableInspector(); 
+  }
+})();
+JS;
+}
+
+function render_template() {
+	static $body = null, $mtime = null;
+	$file = __DIR__ . '/index.tpl.php';
+	$newMtime = @filemtime($file);
+	if ($body !== null && $mtime === $newMtime) {
+		return $body;
+	}
+	if ($newMtime === false) {
+		return null;
+	}
+	ob_start();
+	try {
+		require $file;
+		$body = ob_get_clean();
+	} catch (Throwable $e) {
+		ob_end_clean();
+		dlog('template failed', ['error' => $e->getMessage()]);
+		return null;
+	}
+	// Keep the old template/frontend working: enhance its variable renderer
+	// without requiring index.tpl.php to be edited.
+	$inspector = '<script>window.__DBG_PROPERTY_MAX_DATA=' .
+		cfg_limit('DBG_PROPERTY_MAX_DATA', 4 * 1024 * 1024) . ';' .
+		inspector_frontend_js() . '</script>';
+	$endBody = strripos($body, '</body>');
+	$body = $endBody === false
+		? $body . $inspector
+		: substr_replace($body, $inspector, $endBody, 0);
+	$mtime = $newMtime;
+	return $body;
+}
+
+function serve_static($id, $path): bool {
+	static $cache = [], $cacheSize = 0;
+	$ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+	$mime = [
+		'css' => 'text/css; charset=utf-8',
+		'js' => 'text/javascript; charset=utf-8',
+		'svg' => 'image/svg+xml',
+		'png' => 'image/png',
+		'jpg' => 'image/jpeg',
+		'jpeg' => 'image/jpeg',
+		'ico' => 'image/x-icon',
+		'webp' => 'image/webp',
+		'woff2' => 'font/woff2'
+	];
+	if (!isset($mime[$ext])) {
+		return false;
+	}
+	$base = realpath(__DIR__);
+	$file = realpath(__DIR__ . '/' . ltrim(rawurldecode($path), '/'));
+	if (!$file || strpos($file, $base . DIRECTORY_SEPARATOR) !== 0 || !is_file($file)) {
+		return false;
+	}
+	$size = filesize($file);
+	if ($size === false || $size > 2 * 1024 * 1024) {
+		return false;
+	}
+	$mtime = @filemtime($file);
+	$hit = $cache[$file] ?? null;
+	if ($hit !== null && $hit['size'] === $size && $hit['mtime'] === $mtime) {
+		$content = $hit['body'];
+	} else {
+		$content = @file_get_contents($file);
+		if ($content === false) {
+			return false;
+		}
+		if ($hit !== null) {
+			$cacheSize -= strlen($hit['body']);
+			unset($cache[$file]);
+		}
+		// Assets <= 512 KiB are cached up to 4 MiB, with simple FIFO eviction.
+		if ($size <= 512 * 1024) {
+			while ($cache && $cacheSize + strlen($content) > 4 * 1024 * 1024) {
+				$first = key($cache);
+				$cacheSize -= strlen($cache[$first]['body']);
+				unset($cache[$first]);
+			}
+			$cache[$file] = [
+				'size' => $size,
+				'mtime' => $mtime,
+				'body' => $content
+			];
+			$cacheSize += strlen($content);
+		}
+	}
+	http_response($id, 200, $content, $mime[$ext], true);
+	return true;
+}
+
+function dbg_disconnect($reason = 'closed') {
+	global $state, $stackWaiters, $propertyWaiters;
+	if ($state['dbg']) {
+		@fclose($state['dbg']);
+	}
+	$state['dbg'] = null;
+	$state['status'] = 'idle';
+	$state['rx'] = '';
+	$state['rx_expected'] = null;
+	$state['tx'] = '';
+	$state['commands'] = [];
+	$state['inflight'] = null;
+	$state['applied_bps'] = [];
+	$state['collecting'] = false;
+	$state['connected_at'] = null;
+	// A disconnect is a normal state change for the polling /api/stack endpoint.
+	// Never turn a pending poll into an HTTP error when the PHP request finishes.
+	foreach ($stackWaiters as $id => $skip) {
+		http_json($id, [
+			'status' => 'idle',
+			'last_snapshot' => $state['last_snapshot']
+		]);
+	}
+	$stackWaiters = [];
+	foreach ($propertyWaiters as $id => $_) {
+		http_json($id, [
+			'ok' => false,
+			'error' => 'debugger disconnected'
+		], 409);
+	}
+	$propertyWaiters = [];
+	log_disconnect($reason);
+}
+
+function dbg_queue($command, array $args = [], $callback = null, $resume = false): bool {
+	global $state;
+	if (!$state['dbg']) {
+		return false;
+	}
+	if (count($state['commands']) >= 512) {
+		return false;
+	}
+	$state['commands'][] = [
+		'command' => $command,
+		'args' => $args,
+		'callback' => $callback,
+		'resume' => $resume
+	];
+	dbg_pump();
+	return true;
+}
+
+function dbg_pump() {
+	global $state;
+	if (!$state['dbg'] || $state['inflight'] !== null || !$state['commands']) {
+		return;
+	}
+	$item = array_shift($state['commands']);
+	$state['txn']++;
+	$txn = $state['txn'];
+	$line = $item['command'] . ' -i ' . $txn;
+	foreach ($item['args'] as $key => $val) {
+		$enc = $item['command'] === 'property_get' && $key === 'n'
+			? '"' . str_replace(["\\", '"', "\0"], [
+				"\\\\",
+				'\\"',
+				"\\0"
+			], (string)$val) . '"'
+			: dbgp_arg($val);
+		$line .= ' -' . $key . ' ' . $enc;
+	}
+	$state['tx'] .= $line . "\0";
+	$state['inflight'] = $item + [
+			'txn' => $txn,
+			// Continuation replies occur only when the script stops; no command timeout.
+			'deadline' => $item['resume'] ? null : microtime(true) + 3.0
+		];
+	if ($item['resume']) {
+		$state['status'] = 'running';
+	}
+}
+
+function dbg_sync_bps() {
+	global $state;
+	// Caller must only sync in starting/break state. During run, changes are staged.
+	if (!in_array($state['status'], ['starting', 'break'], true)) {
+		return;
+	}
+	foreach ($state['applied_bps'] as $key => $value) {
+		if (isset($state['desired_bps'][$key])) {
+			continue;
+		}
+		unset($state['applied_bps'][$key]);
+		if ($value !== null) {
+			dbg_queue('breakpoint_remove', ['d' => $value]);
+		}
+	}
+	foreach ($state['desired_bps'] as $key => $bp) {
+		if (array_key_exists($key, $state['applied_bps'])) {
+			continue;
+		}
+		$state['applied_bps'][$key] = null; // queued
+		$generation = $state['generation'];
+		dbg_queue('breakpoint_set', [
+			't' => 'line',
+			'f' => $bp['uri'],
+			'n' => $bp['line']
+		],
+			function ($xml) use ($generation, $key) {
+				global $state;
+				if ($generation !== $state['generation']) {
+					return;
+				}
+				$id = null;
+				if ($xml !== false && $xml !== null && isset($xml['id'])) {
+					$id = (string)$xml['id'];
+				}
+				if (isset($state['desired_bps'][$key])) {
+					if ($id !== null && $id !== '') {
+						$state['applied_bps'][$key] = $id;
+					}
+					else {
+						unset($state['applied_bps'][$key]);
+					}
+				} elseif ($id) {
+					dbg_queue('breakpoint_remove', ['d' => $id]);
+				}
+			});
+	}
+}
+
+function dbg_resume($command): bool {
+	global $state, $stackWaiters, $propertyWaiters;
+	if ($state['status'] !== 'break' && $state['status'] !== 'starting') {
+		return false;
+	}
+	dbg_sync_bps();
+	$state['collecting'] = false;
+	$state['cached_generation'] = -1;
+	foreach ($stackWaiters as $id => $skip) {
+		http_json($id, [
+			'status' => 'running',
+			'last_snapshot' => $state['last_snapshot']
+		]);
+	}
+	$stackWaiters = [];
+	// An inspector reply from a previous pause is never returned after resume.
+	foreach ($propertyWaiters as $id => $_) {
+		http_json($id, ['ok' => false, 'error' => 'execution resumed'], 409);
+	}
+	$propertyWaiters = [];
+	$state['commands'] = array_values(array_filter($state['commands'],
+		static function ($item) {
+			return $item['command'] !== 'property_get';
+		}));
+	$state['status'] = 'running';
+	dbg_queue($command, [], null, true);
+	return true;
+}
+
+function dbg_init_session($xml) {
+	global $state;
+	$state['init'] = (string)$xml->asXML();
+	$state['status'] = 'starting';
+	// Initial context is shallow; every node can be expanded on demand.
+	$features = [
+		['max_children', min(256, cfg_limit('DBG_MAX_CHILDREN', 32))],
+		['max_data', min(65536, cfg_limit('DBG_MAX_DATA', 4096))],
+		['max_depth', 1],
+		['extended_properties', 1],
+		['show_hidden', 1],
+		['resolved_breakpoints', 1],
+	];
+	foreach ($features as $feature) dbg_queue('feature_set', [
+		'n' => $feature[0],
+		'v' => $feature[1]
+	]);
+	dbg_resume('run');
+	dlog('DBGp attached', ['fileuri' => (string)($xml['fileuri'] ?? '')]);
+}
+
+function dbg_publish_snapshot(array $snapshot, $generation) {
+	global $state, $stackWaiters;
+	if ($state['generation'] !== $generation || $state['status'] !== 'break') {
+		return;
+	}
+	$state['last_snapshot'] = $snapshot;
+	$state['cached_generation'] = $generation;
+	$state['collecting'] = false;
+	foreach ($stackWaiters as $id => $skip) {
+		http_json($id, filtered_snapshot($snapshot, $skip));
+	}
+	$stackWaiters = [];
+}
+
+function dbg_collect_snapshot() {
+	global $state;
+	if ($state['status'] !== 'break' || $state['collecting']) {
+		return;
+	}
+	$state['collecting'] = true;
+	$generation = $state['generation'];
+	$capture = [
+		'frames' => [],
+		'locals' => [],
+		'superglobals' => [],
+		'source' => null
+	];
+	dbg_queue('stack_get', [], function ($xml) use (&$capture, $generation) {
+		global $state;
+		if ($state['generation'] !== $generation || $state['status'] !== 'break') {
+			return;
+		}
+		if ($xml !== false && $xml !== null && isset($xml->stack)) {
+			foreach ($xml->stack as $f) {
+				$capture['frames'][] = [
+					'level' => (int)($f['level'] ?? 0),
+					'file' => (string)($f['filename'] ?? ''),
+					'line' => (int)($f['lineno'] ?? 0),
+					'where' => (string)($f['where'] ?? ''),
+					'type' => (string)($f['type'] ?? ''),
+				];
+				if (count($capture['frames']) >= 128) {
+					break;
+				}
+			}
+		}
+		if ($capture['frames']) {
+			$top = $capture['frames'][0];
+			if ($top['file'] !== '' && $top['line'] > 0) {
+				$capture['source'] = read_source_context($top['file'], $top['line'], 10, 10);
+			}
+		}
+		dbg_queue('context_get', [
+			'd' => 0,
+			'c' => 0
+		], function ($locals) use (&$capture, $generation) {
+			global $state;
+			if ($state['generation'] !== $generation || $state['status'] !== 'break') {
+				return;
+			}
+			$capture['locals'] = context_tree($locals, 0, $generation);
+			dbg_queue('context_get', [
+				'd' => 0,
+				'c' => 1
+			], function ($globals) use (&$capture, $generation) {
+				$capture['superglobals'] = context_tree($globals, 1, $generation);
+				dbg_publish_snapshot([
+					'status' => 'break',
+					'generation' => $generation,
+					'frames' => $capture['frames'],
+					'locals' => $capture['locals'],
+					'superglobals' => $capture['superglobals'],
+					'source' => $capture['source'] ?? [
+							'ok' => false,
+							'error' => 'source unavailable'
+						]
+				], $generation);
+			});
+		});
+	});
+}
+
+function dbg_packet($text) {
+	global $state;
+	$xml = @simplexml_load_string($text, 'SimpleXMLElement', LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+	if ($xml === false) {
+		dlog('DBGp malformed XML');
+		return;
+	}
+	$node = $xml->getName();
+	if ($node === 'init') {
+		if ($state['status'] !== 'connecting') {
+			dbg_disconnect('duplicate init');
+			return;
+		}
+		dbg_init_session($xml);
+		return;
+	}
+	if ($node === 'stream' || $node === 'notify') {
+		return;
+	}
+	if ($node !== 'response') {
+		return;
+	}
+	$inflight = $state['inflight'];
+	if (!$inflight) {
+		dlog('DBGp unsolicited response', ['command' => (string)($xml['command'] ?? '')]);
+		return;
+	}
+	if ((int)($xml['transaction_id'] ?? -1) !== $inflight['txn']) {
+		dlog('DBGp transaction mismatch', [
+			'expected' => $inflight['txn'],
+			'got' => (string)($xml['transaction_id'] ?? '')
+		]);
+		return;
+	}
+	$state['inflight'] = null;
+	$status = (string)($xml['status'] ?? '');
+	if ($inflight['resume']) {
+		if ($status === 'break') {
+			$state['status'] = 'break';
+			$state['generation']++;
+			$state['collecting'] = false;
+			$state['cached_generation'] = -1;
+		} elseif ($status === 'stopping' || $status === 'stopped') {
+			$state['status'] = $status;
+		} else {
+			$state['status'] = $status ?: 'unknown';
+		}
+	}
+	if (is_callable($inflight['callback'])) {
+		($inflight['callback'])($xml);
+	}
+	if ($inflight['resume'] && $status === 'break') {
+		dbg_sync_bps();
+		global $stackWaiters;
+		if ($stackWaiters) dbg_collect_snapshot();
+	}
+	// In DBGp 'stopping' is a protocol state, not yet a disconnected request.
+	// Xdebug expects a final stop command to free the PHP worker.
+	if ($inflight['resume'] && $status === 'stopping') {
+		dbg_queue('stop');
+	}
+	if ($inflight['resume'] && $status === 'stopped') {
+		dbg_disconnect('request completed');
+		return;
+	}
+	dbg_pump();
+}
+
+/** Incremental parser: <ascii length>\0<XML body>\0, with a hard memory cap. */
+function dbg_parse_buffer() {
+	global $state;
+	while (true) {
+		if ($state['rx_expected'] === null) {
+			$pos = strpos($state['rx'], "\0");
+			if ($pos === false) {
+				if (strlen($state['rx']) > 12) {
+					dbg_disconnect('invalid header');
+				}
+				return;
+			}
+			$num = substr($state['rx'], 0, $pos);
+			if ($num === '' || strlen($num) > 10 || !ctype_digit($num) || (float)$num > cfg_limit('DBG_MAX_DBGP_PACKET_BYTES', 33554432)) {
+				dbg_disconnect('bad packet length');
+				return;
+			}
+			$state['rx_expected'] = (int)$num;
+			$state['rx'] = substr($state['rx'], $pos + 1);
+		}
+		$n = $state['rx_expected'];
+		if (strlen($state['rx']) < $n + 1) {
+			return;
+		}
+		if ($state['rx'][$n] !== "\0") {
+			dbg_disconnect('missing packet terminator');
+			return;
+		}
+		$packet = substr($state['rx'], 0, $n);
+		$state['rx'] = substr($state['rx'], $n + 1);
+		$state['rx_expected'] = null;
+		dbg_packet($packet);
+		if (!$state['dbg']) {
+			return;
+		}
+	}
+}
+
+function dbg_read() {
+	global $state;
+	$chunk = @fread($state['dbg'], 65536);
+	if ($chunk === false || $chunk === '') {
+		if ($chunk === false || feof($state['dbg'])) dbg_disconnect('eof');
+		return;
+	}
+	$state['rx'] .= $chunk;
+	if (strlen($state['rx']) > cfg_limit('DBG_MAX_DBGP_PACKET_BYTES', 33554432) + 65536) {
+		dbg_disconnect('input limit');
+		return;
+	}
+	dbg_parse_buffer();
+}
+
+function reject_read($id) {
+	global $rejects;
+	if (!isset($rejects[$id])) {
+		return;
+	}
+	$sock = $rejects[$id]['sock'];
+	$bytes = @fread($sock, 8192);
+	if ($bytes === false || $bytes === '') {
+		if ($bytes === false || feof($sock)) {
+			@fclose($sock);
+			unset($rejects[$id]);
+		}
+		return;
+	}
+	$rejects[$id]['received'] += strlen($bytes);
+	// DBGp allows to detach as soon as the connection is initialized.
+	if ($rejects[$id]['received'] > 0 && !$rejects[$id]['sent']) {
+		$rejects[$id]['out'] = "detach -i 1\0";
+		$rejects[$id]['sent'] = true;
+		$rejects[$id]['deadline'] = microtime(true) + 0.3;
+	}
+}
+
+function parse_skip($raw) {
+	if (is_array($raw)) {
+		return array_slice(array_map('strval', $raw), 0, 80);
+	}
+	if (!is_string($raw)) {
+		return [];
+	}
+	return array_slice(explode(',', $raw), 0, 80);
+}
+
+function handle_http($id, $request) {
+	global $state, $stackWaiters, $httpClients;
+	$requestLine = strtok($request, "\r\n");
+	if (!preg_match('#^(GET|HEAD)\s+(\S+)\s+HTTP/1\.[01]$#', $requestLine, $match)) {
+		http_json($id, ['error' => 'only GET/HEAD HTTP/1.x supported'], 400);
+		return;
+	}
+	$method = $match[1];
+	$target = $match[2];
+	$path = parse_url($target, PHP_URL_PATH);
+	if (!is_string($path)) {
+		http_json($id, ['error' => 'bad url'], 400);
+		return;
+	}
+	$query = parse_url($target, PHP_URL_QUERY);
+	$params = [];
+	if (is_string($query)) {
+		parse_str($query, $params);
+	}
+
+	$site = site_from_http_request($request);
+	if ($site === null) {
+		http_json($id, ['error' => 'unknown Host; check Apache ProxyPreserveHost'], 421);
+		return;
+	}
+
+	$httpClients[$id]['site'] = $site;
+	select_site($site);
+	$state =& $GLOBALS['state'];
+	$stackWaiters =& $GLOBALS['stackWaiters'];
+
+	// This existing endpoint is required by the service supervisor.
+	// Do not remove: it applies changes by restarting the daemon.
+	if (!empty($params['restart'])) {
+		exit(1);
+	}
+
+	if ($path === '/dbg') {
+		$path = '/';
+	}
+	if (strpos($path, '/dbg/') === 0) {
+		$path = substr($path, 4);
+	}
+
+	if ($path === '/' || $path === '/index.tpl.php') {
+		$html = render_template();
+		if ($html === null) http_json($id, ['error' => 'index.tpl.php missing'], 500);
+		else http_response($id, 200, $method === 'HEAD' ? '' : $html, 'text/html; charset=utf-8');
+		return;
+	}
+	if (serve_static($id, $path)) {
+		return;
+	}
+	if (strpos($path, '/api/') !== 0) {
+		http_json($id, ['error' => 'not found'], 404);
+		return;
+	}
+	if ($method === 'HEAD') {
+		http_json($id, ['error' => 'HEAD not supported for API'], 405);
+		return;
+	}
+
+	if ($path === '/api/status') {
+		http_json($id, [
+			'attached' => (bool)$state['dbg'],
+			'engine_status' => $state['dbg'] ? $state['status'] : null
+		]);
+		return;
+	}
+	if ($path === '/api/bp/list') {
+		http_json($id, ['desired' => array_values($state['desired_bps'])]);
+		return;
+	}
+	if ($path === '/api/bp/set') {
+		$raw = isset($params['file']) && is_string($params['file']) ? $params['file'] : '';
+		$line = isset($params['line']) && is_scalar($params['line']) ? (int)$params['line'] : 0;
+		$bp = parse_file_ref_and_map($raw, $line);
+		if ($bp['file'] !== '' && !site_allows_source($site, $bp['file'])) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'file is outside this site code roots'
+			], 403);
+			return;
+		}
+		if ($bp['file'] === '' || $bp['line'] <= 0 || $bp['line'] > 2000000 || strlen($bp['file']) > 4096) {
+			http_json($id, ['ok' => false, 'error' => 'bad arguments'], 400);
+			return;
+		}
+		$key = $bp['file'] . ':' . $bp['line'];
+		if (!isset($state['desired_bps'][$key]) && count($state['desired_bps']) >= 200) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'too many breakpoints'
+			], 429);
+			return;
+		}
+		$state['desired_bps'][$key] = $bp;
+		dbg_sync_bps();
+		http_json($id, [
+			'ok' => true,
+			'id' => $state['applied_bps'][$key] ?? null,
+			'staged' => true
+		]);
+		return;
+	}
+	if ($path === '/api/bp/clear') {
+		$state['desired_bps'] = [];
+		dbg_sync_bps();
+		http_json($id, ['ok' => true]);
+		return;
+	}
+	if ($path === '/api/kill') {
+		if ($state['dbg']) {
+			// Never wait for a continuation response from a running PHP request.
+			@fwrite($state['dbg'], "detach -i 999999\0");
+			dbg_disconnect('killed from UI');
+		}
+		http_json($id, ['ok' => true]);
+		return;
+	}
+	// /api/stack is polled unconditionally by the existing frontend, even when
+	// no Xdebug session is attached. Idle is not an API error.
+	if ($path === '/api/stack') {
+		if (!$state['dbg']) {
+			http_json($id, [
+				'status' => 'idle',
+				'last_snapshot' => $state['last_snapshot']
+			]);
+			return;
+		}
+		if ($state['status'] !== 'break') {
+			http_json($id, [
+				'status' => $state['status'],
+				'last_snapshot' => $state['last_snapshot']
+			]);
+			return;
+		}
+		$skip = parse_skip($params['skip'] ?? []);
+		if ($state['cached_generation'] === $state['generation'] && $state['last_snapshot']) {
+			http_json($id, filtered_snapshot($state['last_snapshot'], $skip));
+			return;
+		}
+		if (count($stackWaiters) >= 64) {
+			http_json($id, ['error' => 'too many snapshot requests'], 429);
+			return;
+		}
+		$stackWaiters[$id] = $skip;
+		global $httpClients;
+		$httpClients[$id]['waiting'] = true;
+		$httpClients[$id]['deadline'] = microtime(true) + 5.0;
+		dbg_collect_snapshot();
+		return;
+	}
+	// Lazy variable inspection. Query only when a node is actually expanded.
+	// Full DBGp names are passed through unchanged (not evaluated as PHP code).
+	if ($path === '/api/property') {
+		global $httpClients, $propertyWaiters;
+		if (!$state['dbg'] || $state['status'] !== 'break') {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'debugger is not paused'
+			], 409);
+			return;
+		}
+		$name = $params['name'] ?? null;
+		$context = filter_var($params['ctx'] ?? null, FILTER_VALIDATE_INT);
+		$page = filter_var($params['page'] ?? 0, FILTER_VALIDATE_INT);
+		$generation = filter_var($params['generation'] ?? null, FILTER_VALIDATE_INT);
+		$wantedBytes = filter_var($params['max_data'] ?? 4096, FILTER_VALIDATE_INT);
+		$maxBytes = cfg_limit('DBG_PROPERTY_MAX_DATA', 4 * 1024 * 1024);
+		if (!is_string($name) || $name === '' || strlen($name) > 8192 ||
+			!in_array($context, [0, 1], true) || $page === false || $page < 0 ||
+			$page > 10000000 || $generation === false ||
+			$generation !== $state['generation'] || $wantedBytes === false ||
+			$wantedBytes < 1 || $wantedBytes > $maxBytes) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'invalid or stale property request'
+			], 400);
+			return;
+		}
+		if (count($propertyWaiters) >= 16) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'too many property requests'
+			], 429);
+			return;
+		}
+		$propertyWaiters[$id] = true;
+		$httpClients[$id]['waiting'] = true;
+		$httpClients[$id]['deadline'] = microtime(true) + 6.0;
+		$enqueued = dbg_queue('property_get', [
+			'n' => $name,
+			'd' => 0,
+			'c' => $context,
+			'p' => $page,
+			'm' => $wantedBytes
+		], function ($xml) use ($id, $generation, $context, $page) {
+			global $state, $propertyWaiters;
+			if (!isset($propertyWaiters[$id])) {
+				return;
+			}
+			unset($propertyWaiters[$id]);
+			if ($generation !== $state['generation'] || $state['status'] !== 'break') {
+				http_json($id, [
+					'ok' => false,
+					'error' => 'pause has changed'
+				], 409);
+				return;
+			}
+			if (
+				$xml === false ||
+				$xml === null ||
+				!isset($xml->property) ||
+				isset($xml->error)
+			) {
+				http_json($id, [
+					'ok' => false,
+					'error' => 'property_get failed'
+				], 502);
+				return;
+			}
+			http_json($id, [
+				'ok' => true,
+				'generation' => $generation,
+				'property' => property_tree($xml->property[0], $context, $generation, 0, true, $page)
+			]);
+		});
+		if (!$enqueued) {
+			unset($propertyWaiters[$id]);
+			http_json($id, [
+				'ok' => false,
+				'error' => 'command queue full'
+			], 503);
+		}
+		return;
+	}
+	if (!$state['dbg']) {
+		http_json($id, ['error' => 'no dbg attached'], 409);
+		return;
+	}
+	$commands = [
+		'/api/run' => 'run',
+		'/api/step_over' => 'step_over',
+		'/api/step_into' => 'step_into',
+		'/api/step_out' => 'step_out'
+	];
+	if (isset($commands[$path])) {
+		if (!dbg_resume($commands[$path])) {
+			http_json($id, [
+				'ok' => false,
+				'error' => 'debugger is not paused'
+			], 409);
+			return;
+		}
+		http_json($id, ['ok' => true]);
+		return;
+	}
+	http_json($id, ['error' => 'unknown route: ' . $path], 404);
+}
+
+
+/**
+ * Each entry in DBG_SITES represents one independent debugger session.
+ * Domain is used for HTTP requests, while DBGp uses the initial fileuri.
+ */
+function build_site_configs(array $sites): array {
+	$result = [];
+
+	foreach ($sites as $host => $cfg) {
+		$host = strtolower(rtrim(trim((string)$host), '.'));
+		if ($host === '' || !preg_match('/^[a-z0-9.-]+$/', $host)) {
+			throw new RuntimeException('Invalid DBG_SITES host: ' . $host);
+		}
+		if (!is_array($cfg)) {
+			throw new RuntimeException('Invalid DBG_SITES entry for ' . $host);
+		}
+		if (isset($result[$host])) {
+			throw new RuntimeException('Duplicate DBG_SITES host: ' . $host);
+		}
+
+		$base = isset($cfg['server_base']) ? rtrim(normalize_slashes($cfg['server_base']), '/') : '';
+		if ($base === '' || $base[0] !== '/' || $base === '/') {
+			throw new RuntimeException('Absolute server_base required for ' . $host);
+		}
+
+		$roots = $cfg['match_roots'] ?? [$base];
+		if (!is_array($roots) || !$roots) {
+			throw new RuntimeException('Nonempty match_roots required for ' . $host);
+		}
+
+		$normalized = [];
+		foreach ($roots as $root) {
+			$root = rtrim(normalize_slashes((string)$root), '/');
+			if ($root === '' || $root[0] !== '/' || $root === '/') {
+				throw new RuntimeException('Invalid match_root for ' . $host);
+			}
+			$normalized[] = $root;
+		}
+
+		$codeRoots = $cfg['code_roots'] ?? [$base];
+		if (!is_array($codeRoots) || !$codeRoots) {
+			throw new RuntimeException('Nonempty code_roots required for ' . $host);
+		}
+		foreach ($codeRoots as $root) {
+			if (!is_string($root) || $root === '' || $root[0] !== '/') {
+				throw new RuntimeException('Invalid code_root for ' . $host);
+			}
+		}
+
+		$result[$host] = [
+			'server_base' => $base,
+			'project_base' => isset($cfg['project_base']) ? (string)$cfg['project_base'] : '',
+			'match_roots' => $normalized,
+			'code_roots' => $codeRoots,
+		];
+	}
+	if (!$result) {
+		throw new RuntimeException('DBG_SITES must contain at least one site');
+	}
+	return $result;
+}
+
+/**
+ * Match by directory boundary, never by a simple string prefix.
+ * Resolve symlinks if paths exist, to support symlinked deployments.
+ */
+function clean_absolute_path($path): ?string {
+	$path = normalize_slashes((string)$path);
+	if ($path === '' || $path[0] !== '/') {
+		return null;
+	}
+
+	$parts = [];
+	foreach (explode('/', $path) as $part) {
+		if ($part === '' || $part === '.') {
+			continue;
+		}
+		if ($part === '..') {
+			array_pop($parts);
+		} else {
+			$parts[] = $part;
+		}
+	}
+	return '/' . implode('/', $parts);
+}
+
+function path_within_root($file, $root): bool {
+	$file = clean_absolute_path($file);
+	$root = clean_absolute_path($root);
+	if ($file === null || $root === null) {
+		return false;
+	}
+
+	$realFile = realpath($file);
+	$realRoot = realpath($root);
+	if ($realFile !== false && $realRoot !== false) {
+		$file = clean_absolute_path($realFile);
+		$root = clean_absolute_path($realRoot);
+	}
+
+	return $file === $root || strpos($file, rtrim($root, '/') . '/') === 0;
+}
+
+function site_from_fileuri($uri) {
+	global $siteConfigs;
+
+	if (!is_string($uri) || strpos($uri, 'file://') !== 0) {
+		return null;
+	}
+	$file = normalize_slashes(rawurldecode(file_uri_to_path($uri)));
+	$found = null;
+	$bestLength = 0;
+	$ambiguous = false;
+
+	foreach ($siteConfigs as $site => $cfg) {
+		foreach ($cfg['match_roots'] as $root) {
+			if (!path_within_root($file, $root)) {
+				continue;
+			}
+			$length = strlen($root);
+			if ($length > $bestLength) {
+				$bestLength = $length;
+				$found = $site;
+				$ambiguous = false;
+			} elseif ($length === $bestLength && $found !== $site) {
+				$ambiguous = true;
+			}
+		}
+	}
+
+	return $ambiguous ? null : $found;
+}
+
+function site_from_http_request($request): ?string {
+	global $siteConfigs;
+
+	if (!preg_match('/(?:^|\r?\n)Host:[ \t]*([^\r\n]+)/i', $request, $match)) {
+		return null;
+	}
+	$host = strtolower(trim($match[1]));
+	if (strpos($host, ':') !== false) {
+		$host = explode(':', $host, 2)[0];
+	}
+	$host = rtrim($host, '.');
+	return isset($siteConfigs[$host]) ? $host : null;
+}
+
+function site_allows_source($site, $path): bool {
+	global $siteConfigs;
+	foreach ($siteConfigs[$site]['code_roots'] as $root) {
+		if (path_within_root(file_uri_to_path($path), $root)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Shared DBGP functions operate on the *currently selected site's* state.
+ * Site selection occurs before every socket event, HTTP handler and callback.
+ * This keeps one event loop but prevents accidental sharing of breakpoints.
+ */
+function select_site($site) {
+	global $siteConfigs, $states, $stackWaitersBySite, $propertyWaitersBySite;
+	global $state, $stackWaiters, $propertyWaiters, $DBG_PROJECT_BASE, $DBG_SERVER_BASE;
+
+	if (!isset($states[$site])) {
+		throw new RuntimeException('Unknown site: ' . $site);
+	}
+
+	$GLOBALS['state'] =& $states[$site];
+	$GLOBALS['stackWaiters'] =& $stackWaitersBySite[$site];
+	$GLOBALS['propertyWaiters'] =& $propertyWaitersBySite[$site];
+	$DBG_PROJECT_BASE = $siteConfigs[$site]['project_base'];
+	$DBG_SERVER_BASE = $siteConfigs[$site]['server_base'];
+}
+
+function new_dbg_state(): array {
+	return [
+		'dbg' => null,
+		'init' => null,
+		'status' => 'idle',
+		'rx' => '',
+		'rx_expected' => null,
+		'tx' => '',
+		'txn' => 0,
+		'commands' => [],
+		'inflight' => null,
+		'desired_bps' => [],
+		'applied_bps' => [],
+		'last_snapshot' => null,
+		'cached_generation' => -1,
+		'generation' => 0,
+		'collecting' => false,
+		'connected_at' => null,
+	];
+}
+
+/**
+ * The DBGp socket is initially unassigned. Route only after the init packet
+ * has supplied the entry script's fileuri.
+ */
+function pending_dbg_read($id) {
+	global $pendingDbg, $rejects, $states;
+
+	if (!isset($pendingDbg[$id])) {
+		return;
+	}
+
+	$sock = $pendingDbg[$id]['sock'];
+	$chunk = @fread($sock, 16384);
+	if ($chunk === false || $chunk === '') {
+		if ($chunk === false || feof($sock)) {
+			@fclose($sock);
+			unset($pendingDbg[$id]);
+		}
+		return;
+	}
+
+	$pendingDbg[$id]['rx'] .= $chunk;
+	$buffer = $pendingDbg[$id]['rx'];
+	if (strlen($buffer) > 131072) {
+		@fclose($sock);
+		unset($pendingDbg[$id]);
+		return;
+	}
+
+	$null = strpos($buffer, "\0");
+	if ($null === false) {
+		return;
+	}
+	$lengthText = substr($buffer, 0, $null);
+	if ($lengthText === '' || strlen($lengthText) > 10 || !ctype_digit($lengthText)) {
+		@fclose($sock);
+		unset($pendingDbg[$id]);
+		return;
+	}
+	$length = (int)$lengthText;
+	if ($length < 1 || $length > 65536 || strlen($buffer) < $null + $length + 2) {
+		if ($length > 65536) {
+			@fclose($sock);
+			unset($pendingDbg[$id]);
+		}
+		return;
+	}
+	if ($buffer[$null + $length + 1] !== "\0") {
+		@fclose($sock);
+		unset($pendingDbg[$id]);
+		return;
+	}
+
+	$xmlText = substr($buffer, $null + 1, $length);
+	$tail = substr($buffer, $null + $length + 2);
+	$xml = @simplexml_load_string(
+		$xmlText,
+		'SimpleXMLElement',
+		LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING
+	);
+	$site = null;
+	if ($xml !== false && $xml->getName() === 'init') {
+		$site = site_from_fileuri((string)($xml['fileuri'] ?? ''));
+	}
+
+	unset($pendingDbg[$id]);
+	if ($site === null) {
+		dlog('DBGp unrecognized or ambiguous fileuri', ['init' => substr($xmlText, 0, 256)]);
+		$rejects[$id] = [
+			'sock' => $sock,
+			'received' => strlen($xmlText),
+			'sent' => true,
+			'out' => "detach -i 1\0",
+			'deadline' => microtime(true) + 0.3,
+		];
+		return;
+	}
+
+	select_site($site);
+	if ($states[$site]['dbg']) {
+		dlog('DBGp additional connection refused (site busy)', ['site' => $site]);
+		$rejects[$id] = [
+			'sock' => $sock,
+			'received' => strlen($xmlText),
+			'sent' => true,
+			'out' => "detach -i 1\0",
+			'deadline' => microtime(true) + 0.3,
+		];
+		return;
+	}
+
+	$states[$site]['dbg'] = $sock;
+	$states[$site]['status'] = 'connecting';
+	$states[$site]['rx'] = $tail;
+	$states[$site]['rx_expected'] = null;
+	$states[$site]['tx'] = '';
+	$states[$site]['commands'] = [];
+	$states[$site]['inflight'] = null;
+	$states[$site]['applied_bps'] = [];
+	$states[$site]['last_snapshot'] = null;
+	$states[$site]['cached_generation'] = -1;
+	$states[$site]['generation']++;
+	$states[$site]['connected_at'] = microtime(true);
+	$states[$site]['collecting'] = false;
+
+	dbg_init_session($xml);
+	if ($tail !== '') {
+		dbg_parse_buffer();
+	}
+	dlog('DBGp routed', ['site' => $site]);
+}
+
+$dbgSock = @stream_socket_server("tcp://$DBG_HOST:$DBG_PORT", $errNo, $errStr);
+if (!$dbgSock) {
+	fwrite(STDERR, "DBGp listen: $errStr\n");
+	exit(1);
+}
+$httpSock = @stream_socket_server("tcp://$HTTP_HOST:$HTTP_PORT", $errNo, $errStr);
+if (!$httpSock) {
+	fwrite(STDERR, "HTTP listen: $errStr\n");
+	exit(1);
+}
+stream_set_blocking($dbgSock, false);
 stream_set_blocking($httpSock, false);
 
-dlog("START panel", ['DBGp' => "$DBG_HOST:$DBG_PORT", 'HTTP' => "$HTTP_HOST:$HTTP_PORT"]);
+if (!isset($DBG_SITES) || !is_array($DBG_SITES)) {
+	fwrite(STDERR, "Missing \$DBG_SITES in config.php\n");
+	exit(1);
+}
 
-$state = ['dbg' => null, 'init' => null, 'bps' => [], 'desired_bps' => [], 'last_snapshot' => null, 'stepping' => false];
+try {
+	$siteConfigs = build_site_configs($DBG_SITES);
+} catch (RuntimeException $error) {
+	fwrite(STDERR, "Invalid DBG_SITES: " . $error->getMessage() . "\n");
+	exit(1);
+}
+
+$states = [];
+$stackWaitersBySite = [];
+$propertyWaitersBySite = [];
+
+foreach ($siteConfigs as $site => $config) {
+	$states[$site] = new_dbg_state();
+	$stackWaitersBySite[$site] = [];
+	$propertyWaitersBySite[$site] = [];
+}
+
+select_site(key($siteConfigs));
+
+$httpClients = [];
+$pendingDbg = [];
+$rejects = [];
+
+dlog('START multi-site debugger', [
+	'DBGp' => "$DBG_HOST:$DBG_PORT",
+	'HTTP' => "$HTTP_HOST:$HTTP_PORT",
+	'sites' => array_keys($siteConfigs),
+]);
 echo "DBGp on $DBG_HOST:$DBG_PORT | Web UI on http://$HTTP_HOST:$HTTP_PORT\n";
-
-function http_reply($c, $code, $body, $ctype = 'application/json; charset=utf-8') {
-	$hdr = "HTTP/1.1 $code OK\r\n"
-		. "Content-Type: $ctype\r\n"
-		. "Content-Length: " . strlen($body) . "\r\n"
-		. "Connection: close\r\n\r\n";
-	fwrite($c, $hdr . $body);
-}
-
-function http_json($c, $obj) {
-	http_reply($c, 200, json_encode($obj, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
-}
-
-$clients = [$dbgSock, $httpSock];
+echo "Sites: " . implode(', ', array_keys($siteConfigs)) . "\n";
 
 while (true) {
-	$r = $clients;
-	$w = $e = null;
-	stream_select($r, $w, $e, null);
+	$read = [$dbgSock, $httpSock];
+	$write = [];
+	$dbgSocketSites = [];
 
-	foreach ($r as $ready) {
-		// New attach.
-		if ($ready === $dbgSock) {
-			$conn = stream_socket_accept($dbgSock, 0);
-			if ($conn) {
-				dlog("DBGp: ATTACH");
-				stream_set_blocking($conn, true);
+	foreach ($states as $site => $siteState) {
+		if (!$siteState['dbg']) {
+			continue;
+		}
 
-				if ($state['dbg']) {
-					$cur = dbgp_cmd_safe($state['dbg'], 'status', [], '', 0.6, 0);
-					$cur_status = ($cur && isset($cur['status'])) ? (string)$cur['status'] : null;
+		$socket = $siteState['dbg'];
+		$dbgSocketSites[(int)$socket] = $site;
+		$read[] = $socket;
+		if ($siteState['tx'] !== '') {
+			$write[] = $socket;
+		}
+	}
 
-					if ($cur_status === 'break' || $cur_status === 'starting' || $cur_status === 'running') {
-						// Skip new connection.
-						$init_probe = dbgp_read_packet($conn, 0.5);
-						@fwrite($conn, "detach -i 1\0");
-						@fclose($conn);
-						dlog("DBGp: new attach rejected (active session: $cur_status)");
-						continue;
-					}
+	foreach ($pendingDbg as $client) {
+		$read[] = $client['sock'];
+	}
 
-					// Any other status (stopping / stopped / ошибка) — drop old session.
-					$old = $state['dbg'];
-					$idx = array_search($old, $clients, true);
-					if ($idx !== false) {
-						unset($clients[$idx]);
-					}
-					@fclose($old);
-					$state['dbg'] = null;
-					$state['last_snapshot'] = null;
+	foreach ($httpClients as $client) {
+		if ($client['out'] !== '') {
+			$write[] = $client['sock'];
+		} elseif (!$client['waiting']) {
+			$read[] = $client['sock'];
+		}
+	}
+
+	foreach ($rejects as $client) {
+		$read[] = $client['sock'];
+		if ($client['out'] !== '') {
+			$write[] = $client['sock'];
+		}
+	}
+
+	$except = null;
+	$selected = @stream_select($read, $write, $except, 0, 200000);
+	if ($selected === false) {
+		usleep(10000);
+		continue;
+	}
+
+	foreach ($read as $sock) {
+		if ($sock === $dbgSock) {
+			for ($i = 0; $i < 32; $i++) {
+				$conn = @stream_socket_accept($dbgSock, 0);
+				if (!$conn) {
+					break;
 				}
 
-				$init = dbgp_read_packet($conn, 3.0);
-				$state['dbg'] = $conn;
-				$state['init'] = $init;
-				$state['last_snapshot'] = null;
-				echo "[DBGp] attached\n";
-				$clients[] = $conn;
-
-				foreach ([
-					         ['max_children', 256],
-					         ['max_data', 8192],
-					         ['max_depth', 5],
-					         ['extended_properties', 1],
-					         ['show_hidden', 1],
-					         ['resolved_breakpoints', 1],
-				         ] as $f) {
-					dbgp_cmd_safe($conn, 'feature_set', ['n' => $f[0], 'v' => $f[1]], '', 1.0, 0);
+				stream_set_blocking($conn, false);
+				if (count($pendingDbg) + count($rejects) >= 64) {
+					@fclose($conn);
+					continue;
 				}
 
-				$state['bps'] = [];
-				foreach ($state['desired_bps'] as $bp) {
-					$uri = $bp['uri'] ?? path_to_file_uri($bp['file']);
-					$resp = dbgp_cmd_safe($conn, 'breakpoint_set',
-						['t' => 'line', 'f' => $uri, 'n' => $bp['line']], '', 1.2, 1);
-					if ($resp && isset($resp['id'])) {
-						$id = (string)$resp['id'];
-						if ($id !== '') $state['bps'][$id] = [
-							'file' => $bp['file'],
-							'uri' => $uri,
-							'line' => $bp['line']
-						];
-					}
-				}
-
-				dbgp_cmd_safe($conn, 'run', [], '', 1.0, 0);
+				$id = (int)$conn;
+				$pendingDbg[$id] = [
+					'sock' => $conn,
+					'rx' => '',
+					'deadline' => microtime(true) + 3.0,
+				];
 			}
 			continue;
 		}
 
-		if ($ready === $httpSock) {
-			$conn = stream_socket_accept($httpSock, 0);
-			if ($conn) {
-				stream_set_blocking($conn, true);
-				$req = '';
-				while (($line = fgets($conn)) !== false) {
-					$req .= $line;
-					if (rtrim($line) === '') break;
-				}
-				if (!preg_match('#^(\w+)\s+([^\s]+)#', $req, $m)) {
-					fclose($conn);
-					continue;
-				}
-				$requestTarget = $m[2];
-				$path = parse_url($requestTarget, PHP_URL_PATH) ?: '/';
-				$queryString = parse_url($requestTarget, PHP_URL_QUERY) ?? '';
-				$q = [];
-				if ($queryString !== '') {
-					parse_str($queryString, $q);
-				};
-				if (!empty($q['restart'])) {
-					exit(1);
-				}
-				dlog("HTTP request", [
-					'raw' => trim(strtok($req, "\r")),
-					'path' => $path,
-					'query' => $queryString,
-					'orig' => $requestTarget
-				]);
-				if (strpos($path, '/dbg/') === 0) {
-					$path = substr($path, 4);
+		if ($sock === $httpSock) {
+			for ($i = 0; $i < 32; $i++) {
+				$conn = @stream_socket_accept($httpSock, 0);
+				if (!$conn) {
+					break;
 				}
 
-				if ($path === '/' || $path === '/index.tpl.php') {
-					ob_start();
-					require __DIR__ . '/index.tpl.php';
-					$html = ob_get_clean();
-					http_reply($conn, 200, $html, 'text/html; charset=utf-8');
-					fclose($conn);
+				stream_set_blocking($conn, false);
+				if (count($httpClients) >= cfg_limit('DBG_MAX_HTTP_CLIENTS', 128)) {
+					@fwrite(
+						$conn,
+						"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+					);
+					@fclose($conn);
 					continue;
 				}
 
-				// API
-				$dbg = $state['dbg'];
-				if ($path === '/api/kill') {
-					dlog('API kill: start');
-					// Close active session.
-					if ($state['dbg']) {
-						// Try to detach.
-						@fwrite($state['dbg'], "detach -i 1\0");
-						// Close socket.
-						@stream_set_blocking($state['dbg'], false);
-						@fclose($state['dbg']);
-						dlog('API kill: detached & closed active dbg');
-						$state['dbg'] = null;
-					}
-
-					// Close the remaining connections.
-					$kept = [];
-					foreach ($clients as $h) {
-						if ($h === $dbgSock || $h === $httpSock) {
-							$kept[] = $h;
-							continue;
-						}
-						@fclose($h);
-					}
-					$clients = $kept;
-
-					$state['last_snapshot'] = null;
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-				if ($path === '/api/status') {
-					if (!$dbg) {
-						http_json($conn, ['attached' => false, 'engine_status' => null]);
-						fclose($conn);
-						continue;
-					}
-					dlog("API status", ['attached' => (bool)$dbg]);
-					$engine_status = null;
-					$auto = null;
-
-					if ($dbg) {
-						$st = dbgp_cmd_safe($dbg, 'status', [], '', 1.0, 0);
-						if ($st && isset($st['status'])) $engine_status = (string)$st['status'];
-
-						if (0 && $engine_status === 'stopping' && empty($state['stepping'])) {
-							$frames = [];
-							$stack = dbgp_cmd_safe($dbg, 'stack_get', [], '', 1.0, 1);
-							if ($stack && isset($stack->stack)) {
-								foreach ($stack->stack as $f) {
-									$frames[] = [
-										'level' => (int)$f['level'],
-										'file' => (string)$f['filename'],
-										'line' => (int)$f['lineno'],
-										'where' => (string)$f['where'],
-										'type' => (string)$f['type'],
-									];
-								}
-							}
-
-							if (!$frames) {
-								dlog("API status: stopping without stack, assume script is finishing");
-							} elseif (!is_our_break($frames, array_values($state['desired_bps']))) {
-								dlog("API status: auto-continue (not our stop)", ['top' => $frames[0] ?? null]);
-								dbgp_cmd_safe($dbg, 'run', [], '', 1.0, 0);
-								$engine_status = 'running';
-								$auto = ['auto_continued' => true, 'skipped_top' => $frames[0] ?? null];
-							} else {
-								// Our stop - stay.
-								$state['stepping'] = false;
-							}
-						}
-					}
-
-					$payload = ['attached' => (bool)$dbg, 'engine_status' => $engine_status];
-					if ($auto) $payload += $auto;
-					http_json($conn, $payload);
-					fclose($conn);
-					continue;
-				}
-
-				if ($path === '/api/bp/list') {
-					dlog("API bp/list", ['desired' => count($state['desired_bps'])]);
-					http_json($conn, ['desired' => array_values($state['desired_bps'])]);
-					fclose($conn);
-					continue;
-				}
-				if (starts_with($path, '/api/bp/clear')) {
-					dlog("API bp/clear");
-					$state['desired_bps'] = [];
-					if ($dbg) {
-						foreach ($state['bps'] as $id => $_) {
-							dbgp_cmd_safe($dbg, 'breakpoint_remove', ['d' => $id], '', 1.0, 0);
-						}
-					}
-					$state['bps'] = [];
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-
-				if ($path === '/api/bp/set') {
-					$fileRaw = isset($q['file']) ? (string)$q['file'] : '';
-					$lineRaw = isset($q['line']) ? (int)$q['line'] : 0;
-
-					$parsed = parse_file_ref_and_map($fileRaw, $lineRaw);
-					$file = $parsed['file'];
-					$line = (int)$parsed['line'];
-					$uri = $parsed['uri'];
-
-					if ($file === '' || $line < 1) {
-						dlog("API bp/set INVALID", ['file' => $file, 'line' => $line, 'qs' => $queryString]);
-						http_json($conn, ['ok' => false, 'error' => 'bad arguments']);
-						fclose($conn);
-						continue;
-					}
-
-					$uri = path_to_file_uri($file);
-
-					// Add in queue (even w/out attach)
-					$state['desired_bps'][$file . ':' . $line] = ['file' => $file, 'uri' => $uri, 'line' => $line];
-
-					$id = null;
-					if ($state['dbg']) {
-						$resp = dbgp_cmd_safe($state['dbg'], 'breakpoint_set', ['t' => 'line', 'f' => $uri, 'n' => $line], '', 1.0, 1);
-						if ($resp && isset($resp['id'])) $id = (string)$resp['id'];
-					}
-
-					dlog("API bp/set OK", ['file' => $file, 'line' => $line, 'uri' => $uri, 'id' => $id, 'staged' => !$state['dbg']]);
-					http_json($conn, ['ok' => true, 'id' => $id, 'staged' => !$state['dbg']]);
-					fclose($conn);
-					continue;
-				}
-
-				if (!$dbg) {
-					http_json($conn, ['error' => 'no dbg attached']);
-					fclose($conn);
-					continue;
-				}
-
-				if ($path === '/api/stack') {
-					$skip = [];
-					if (isset($q['skip'])) {
-						if (is_array($q['skip'])) {
-							foreach ($q['skip'] as $v) {
-								$v = trim((string)$v);
-								if ($v !== '') {
-									$skip[] = $v;
-								}
-							}
-						} else {
-							$parts = explode(',', (string)$q['skip']);
-							foreach ($parts as $v) {
-								$v = trim($v);
-								if ($v !== '') {
-									$skip[] = $v;
-								}
-							}
-						}
-					}
-
-					$st = dbgp_cmd_safe($dbg, 'status', [], '', 1.0, 0);
-					$engine_status = ($st && isset($st['status'])) ? (string)$st['status'] : 'unknown';
-					if ($engine_status !== 'break') {
-						http_json($conn, ['status' => $engine_status, 'last_snapshot' => $state['last_snapshot']]);
-						fclose($conn);
-						continue;
-					}
-
-					$frames = [];
-					$stack = dbgp_cmd_safe($dbg, 'stack_get', [], '', 1.0, 1);
-					if ($stack) {
-						foreach ($stack->stack as $f) {
-							$frames[] = [
-								'level' => (int)$f['level'],
-								'file' => (string)$f['filename'],
-								'line' => (int)$f['lineno'],
-								'where' => (string)$f['where'],
-								'type' => (string)$f['type'],
-							];
-						}
-					}
-
-					// No breakpoint and no step -> skip.
-					if (0 && empty($state['stepping']) && !is_our_break($frames, array_values($state['desired_bps']))) {
-						dlog("AUTO-CONT (stack)", ['top' => $frames[0] ?? null]);
-						dbgp_cmd_safe($dbg, 'run', [], '', 1.0, 0);
-						http_json($conn, ['status' => 'running', 'auto_continued' => true, 'skipped_top' => $frames[0] ?? null]);
-						fclose($conn);
-						continue;
-					}
-
-					$source_ctx = null;
-					if (!empty($frames)) {
-						$top_file = $frames[0]['file'] ?? '';
-						$top_line = (int)($frames[0]['line'] ?? 0);
-						if ($top_file && $top_line > 0) {
-							$source_ctx = read_source_context($top_file, $top_line, 10, 10);
-						}
-					}
-
-					$locals = collect_context_tree($dbg, 0, 10, 64, $skip);
-					$super = collect_context_tree($dbg, 1, 7, 64, $skip);
-
-					$snap = [
-						'status' => 'break',
-						'frames' => $frames,
-						'locals' => $locals,
-						'superglobals' => $super,
-						'source' => $source_ctx,
-					];
-
-					$state['last_snapshot'] = $snap;
-
-					// Skip next.
-					if (is_our_break($frames, array_values($state['desired_bps']))) {
-						$state['stepping'] = false;
-					}
-
-					http_json($conn, $snap);
-					fclose($conn);
-					dlog("API stack: status", ['engine_status' => $engine_status, 'has_snapshot' => $state['last_snapshot'] ? true : false]);
-					continue;
-				}
-
-				if ($path === '/api/run') {
-					dbgp_cmd_safe($dbg, 'run', [], '', 1.0, 0);
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-				if ($path === '/api/step_over') {
-					$state['stepping'] = true;
-					dbgp_cmd_safe($dbg, 'step_over', [], '', 1.0, 0);
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-				if ($path === '/api/step_into') {
-					$state['stepping'] = true;
-					dbgp_cmd_safe($dbg, 'step_into', [], '', 1.0, 0);
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-				if ($path === '/api/step_out') {
-					$state['stepping'] = true;
-					dbgp_cmd_safe($dbg, 'step_out', [], '', 1.0, 0);
-					http_json($conn, ['ok' => true]);
-					fclose($conn);
-					continue;
-				}
-
-				dlog("API unknown route", ['path' => $path]);
-				http_json($conn, ['error' => 'unknown route: ' . $path]);
-				fclose($conn);
-				continue;
+				$httpClients[(int)$conn] = [
+					'sock' => $conn,
+					'in' => '',
+					'out' => '',
+					'waiting' => false,
+					'deadline' => microtime(true) + 3.0,
+					'site' => null,
+				];
 			}
+			continue;
 		}
 
-		if ($ready === $state['dbg']) {
-			$xml = dbgp_read_packet($state['dbg'], 0.1);
+		$id = (int)$sock;
+		if (isset($dbgSocketSites[$id])) {
+			select_site($dbgSocketSites[$id]);
+			if ($state['dbg'] === $sock) {
+				dbg_read();
+			}
+			continue;
+		}
 
-			if ($xml !== null) {
-				$sx = @simplexml_load_string($xml);
-				if ($sx) {
-					$name = $sx->getName();
-					$status = isset($sx['status']) ? (string)$sx['status'] : '';
-					$command = isset($sx['command']) ? (string)$sx['command'] : '';
-					dlog("DBGp async: packet", ['name' => $name, 'status' => $status, 'command' => $command]);
-				} else {
-					dlog("DBGp async: non-XML", ['head' => substr($xml, 0, 120)]);
-				}
+		if (isset($pendingDbg[$id])) {
+			pending_dbg_read($id);
+			continue;
+		}
+
+		if (isset($rejects[$id])) {
+			reject_read($id);
+			continue;
+		}
+
+		if (!isset($httpClients[$id])) {
+			continue;
+		}
+
+		$data = @fread($sock, 16384);
+		if ($data === false || $data === '') {
+			if ($data === false || feof($sock)) {
+				http_close($id);
+			}
+			continue;
+		}
+
+		$httpClients[$id]['in'] .= $data;
+		if (strlen($httpClients[$id]['in']) > 16384) {
+			http_json($id, ['error' => 'request headers too large'], 413);
+			continue;
+		}
+
+		if (
+			strpos($httpClients[$id]['in'], "\r\n\r\n") !== false ||
+			strpos($httpClients[$id]['in'], "\n\n") !== false
+		) {
+			handle_http($id, $httpClients[$id]['in']);
+		}
+	}
+
+	foreach ($write as $sock) {
+		$id = (int)$sock;
+		if (isset($dbgSocketSites[$id])) {
+			select_site($dbgSocketSites[$id]);
+			if ($state['dbg'] !== $sock || $state['tx'] === '') {
+				continue;
 			}
 
-			$meta = stream_get_meta_data($state['dbg']);
-			if (!empty($meta['eof'])) {
-				$idx = array_search($state['dbg'], $clients, true);
-				if ($idx !== false) unset($clients[$idx]);
-				@fclose($state['dbg']);
-				$state['dbg'] = null;
-				dlog("DBGp: CLOSED (eof=1)");
-				echo "[DBGp] closed\n";
+			$written = @fwrite($sock, substr($state['tx'], 0, 16384));
+			if ($written === false) {
+				dbg_disconnect('send failed');
+			} elseif ($written > 0) {
+				$state['tx'] = substr($state['tx'], $written);
 			}
+			continue;
+		}
+
+		if (isset($rejects[$id])) {
+			$written = @fwrite($sock, $rejects[$id]['out']);
+			if ($written === false) {
+				@fclose($sock);
+				unset($rejects[$id]);
+			} elseif ($written > 0) {
+				$rejects[$id]['out'] = substr($rejects[$id]['out'], $written);
+			}
+			continue;
+		}
+
+		if (!isset($httpClients[$id])) {
+			continue;
+		}
+
+		$written = @fwrite($sock, substr($httpClients[$id]['out'], 0, 65536));
+		if ($written === false) {
+			http_close($id);
+			continue;
+		}
+		if ($written > 0) {
+			$httpClients[$id]['out'] = substr($httpClients[$id]['out'], $written);
+			if ($httpClients[$id]['out'] === '') {
+				http_close($id);
+			}
+		}
+	}
+
+	$now = microtime(true);
+	foreach ($states as $site => $ignored) {
+		select_site($site);
+		if (
+			$state['dbg'] &&
+			$state['status'] === 'connecting' &&
+			$state['connected_at'] !== null &&
+			$now - $state['connected_at'] > 3
+		) {
+			dbg_disconnect('handshake timeout');
+		}
+
+		if (
+			$state['inflight'] &&
+			$state['inflight']['deadline'] !== null &&
+			$state['inflight']['deadline'] < $now
+		) {
+			dbg_disconnect('DBGp command timeout: ' . $state['inflight']['command']);
+		}
+	}
+
+	foreach ($pendingDbg as $id => $pending) {
+		if ($pending['deadline'] < $now) {
+			@fclose($pending['sock']);
+			unset($pendingDbg[$id]);
+		}
+	}
+
+	foreach ($httpClients as $id => $client) {
+		if ($client['deadline'] >= $now) {
+			continue;
+		}
+		if ($client['out'] !== '') {
+			http_close($id);
+			continue;
+		}
+
+		if ($client['site'] !== null) {
+			unset($stackWaitersBySite[$client['site']][$id]);
+			unset($propertyWaitersBySite[$client['site']][$id]);
+		}
+		http_json($id, ['error' => 'request timeout'], 504);
+	}
+
+	foreach ($rejects as $id => $reject) {
+		if ($reject['deadline'] < $now) {
+			@fclose($reject['sock']);
+			unset($rejects[$id]);
 		}
 	}
 }
