@@ -31,9 +31,16 @@
     }
 
     function enableVariableInspector() {
-        if (typeof window.renderVarNode !== 'function') {
+        if (window.__DBG_INSPECTOR_INSTALLED) {
             return;
         }
+
+        if (typeof window.renderVarNode !== 'function') {
+            console.error('debugpanel.js must be loaded before debugpanel.inspector.js');
+            return;
+        }
+
+        window.__DBG_INSPECTOR_INSTALLED = true;
 
         const originalRenderVarNode = window.renderVarNode;
 
@@ -238,23 +245,7 @@
 
             return root;
         };
-
-        for (const id of ['vars-locals', 'vars-super']) {
-            const element = document.getElementById(id);
-
-            if (element) {
-                element.__lastSig = null;
-            }
-        }
-
-        if (typeof window.refresh === 'function') {
-            window.refresh();
-        }
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', enableVariableInspector, {once: true});
-    } else {
-        enableVariableInspector();
-    }
+    enableVariableInspector();
 })();

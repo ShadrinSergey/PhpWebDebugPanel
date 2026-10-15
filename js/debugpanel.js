@@ -1,3 +1,5 @@
+'use strict';
+
 function setCookie(name, value) {
     document.cookie = name + '=' + value + '; path=/';
 }
@@ -7,12 +9,19 @@ function deleteCookie(name) {
 }
 
 function hasCookie(name) {
-    return document.cookie.split(';').some(c => c.trim().startsWith(name + '='));
+    return document.cookie.split(';').some(function (cookie) {
+        return cookie.trim().startsWith(name + '=');
+    });
 }
 
 function updateToggleUI() {
     const toggle = document.getElementById('xdebug-toggle');
     const trigger = document.getElementById('xdebug-trigger');
+
+    if (!toggle || !trigger) {
+        return;
+    }
+
     if (hasCookie('XDEBUG_TRIGGER')) {
         toggle.style.background = '#4caf50';
         trigger.style.left = '38px';
@@ -30,70 +39,360 @@ function toggleXdebug() {
         setCookie('XDEBUG_TRIGGER', 1);
         setCookie('XDEBUG_CMD', 1);
     }
+
     updateToggleUI();
 }
 
-updateToggleUI();
+async function api(path) {
+    const response = await fetch(path, {
+        cache: 'no-store'
+    });
+    const result = await response.json();
 
-async function api(p) {
-    const r = await fetch(p);
-    return r.json()
+    if (!response.ok) {
+        throw new Error(result.error || 'HTTP ' + response.status);
+    }
+
+    return result;
 }
 
-let $autoContinueCount = 0;
 const urlParams = new URLSearchParams(window.location.search);
 const skipParams = new URLSearchParams();
-for (const v of urlParams.getAll('skip')) {
-    skipParams.append('skip', v);
-}
-for (const v of urlParams.getAll('skip[]')) {
-    skipParams.append('skip[]', v);
-}
-const STACK_SKIP_QS = skipParams.toString() ? ('?' + skipParams.toString()) : '';
-let refreshTimeout = null;
 
-async function refresh() {
+for (const value of urlParams.getAll('skip')) {
+    skipParams.append('skip', value);
+}
+
+for (const value of urlParams.getAll('skip[]')) {
+    skipParams.append('skip[]', value);
+}
+
+const STACK_SKIP_QS = skipParams.toString() ? '?' + skipParams.toString() : '';
+
+// Only one status/stack polling cycle may run at a time. An overlapping
+// request schedules one additional cycle instead of racing its DOM changes.
+let refreshPromise = null;
+let refreshQueued = false;
+let renderEpoch = 0;
+let lastStackSignature = null;
+let lastCodeSignature = null;
+
+function resetVariableTree(element) {
+    element.replaceChildren();
+    element.__lastSig = null;
+}
+
+function resetPausedView(status) {
+    const locals = document.getElementById('vars-locals');
+    const superglobals = document.getElementById('vars-super');
+
+    resetVariableTree(locals);
+    resetVariableTree(superglobals);
+    renderCode(null);
+    renderStack({
+        status: status || 'running',
+        frames: [],
+        source: null
+    });
+}
+
+function beginDebuggerAction() {
+    // A reply from a refresh initiated before this command must not repaint
+    // the breakpoint and its variable trees after execution has resumed.
+    renderEpoch++;
+    resetPausedView('running');
+    document.getElementById('status').textContent = 'working…';
+}
+
+async function refreshOnce() {
+    const epoch = renderEpoch;
+
     try {
-        if (refreshTimeout) {
-            clearTimeout(refreshTimeout);
-            refreshTimeout = null;
-        }
-        const s = await api('/dbg/api/status');
-        window.__DBG_PROPERTY_MAX_DATA = Number(s.property_max_data) || (4 * 1024 * 1024);
-        document.getElementById('status').textContent = s.attached ? ('attached / ' + (s.engine_status || 'unknown')) : 'waiting…';
+        const session = await api('/dbg/api/status');
 
-        if (s.attached && s.engine_status === 'stopping') {
-            $autoContinueCount++;
-            if ($autoContinueCount >= 3) {
-                $autoContinueCount = 0;
-                await api('/dbg/api/run');
-                return;
-            } else {
-                refreshTimeout = setTimeout(refresh, 300);
-            }
+        if (epoch !== renderEpoch) {
+            return;
         }
 
-        const st = await api('/dbg/api/stack' + STACK_SKIP_QS);
-        const localsEl = document.getElementById('vars-locals');
-        const superEl = document.getElementById('vars-super');
-        renderStack(st);
+        window.__DBG_PROPERTY_MAX_DATA = Number(session.property_max_data) || (4 * 1024 * 1024);
 
-        if (st && st.status === 'break' && st.source) {
+        const snapshot = await api('/dbg/api/stack' + STACK_SKIP_QS);
 
-            renderVarTree(localsEl, st.locals);
-            renderVarTree(superEl, st.superglobals);
-            renderCode(st.source);
+        if (epoch !== renderEpoch) {
+            return;
+        }
+
+        // The status can change between these two requests. Prefer the stack
+        // response for the state displayed alongside the captured variables.
+        const status = session.attached
+            ? (snapshot.status || session.engine_status || 'unknown')
+            : 'waiting…';
+        document.getElementById('status').textContent = session.attached
+            ? 'attached / ' + status
+            : status;
+
+        renderSafely('stack', function () {
+            renderStack(snapshot);
+        });
+
+        if (snapshot && snapshot.status === 'break') {
+            // Source availability must not determine whether locals or
+            // superglobals are rendered. Each pane is independent.
+            renderSafely('source', function () {
+                renderCode(snapshot.source || null);
+            });
+
+            renderSafely('locals', function () {
+                renderVarTree(
+                    document.getElementById('vars-locals'),
+                    snapshot.locals,
+                    snapshot.generation
+                );
+            });
+
+            renderSafely('superglobals', function () {
+                renderVarTree(
+                    document.getElementById('vars-super'),
+                    snapshot.superglobals,
+                    snapshot.generation
+                );
+            });
         } else {
-            localsEl.innerHTML = '';
-            superEl.innerHTML = '';
+            resetVariableTree(document.getElementById('vars-locals'));
+            resetVariableTree(document.getElementById('vars-super'));
             renderCode(null);
         }
-    } catch (e) {
-        document.getElementById('status').textContent = 'error';
+    } catch (error) {
+        if (epoch === renderEpoch) {
+            document.getElementById('status').textContent = 'error: ' + error.message;
+            console.error('Debugger refresh failed:', error);
+        }
     }
 }
 
-document.getElementById('bpForm').onsubmit = async (event) => {
+function renderSafely(name, callback) {
+    try {
+        callback();
+    } catch (error) {
+        // One broken pane must never prevent other panes from being painted.
+        console.error('Debugger rendering failed (' + name + '):', error);
+    }
+}
+
+function refresh() {
+    if (refreshPromise !== null) {
+        refreshQueued = true;
+        return refreshPromise;
+    }
+
+    refreshPromise = (async function () {
+        try {
+            do {
+                refreshQueued = false;
+                await refreshOnce();
+            } while (refreshQueued);
+        } finally {
+            refreshPromise = null;
+
+            // Handle the edge case where a call queued a refresh just as the
+            // previous polling cycle was finishing.
+            if (refreshQueued) {
+                refresh();
+            }
+        }
+    })();
+
+    return refreshPromise;
+}
+
+function renderStack(snapshot) {
+    const element = document.getElementById('stack-body');
+    let view = snapshot;
+
+    if (snapshot && typeof snapshot === 'object') {
+        view = {
+            status: snapshot.status,
+            frames: Array.isArray(snapshot.frames) ? snapshot.frames.slice() : undefined,
+            source: snapshot.source
+        };
+
+        if (Array.isArray(view.frames)) {
+            view.frames.sort(function (a, b) {
+                return (a.level | 0) - (b.level | 0);
+            });
+        }
+    }
+
+    const signature = JSON.stringify(view);
+
+    if (signature === lastStackSignature && element.textContent !== '') {
+        return;
+    }
+
+    element.textContent = JSON.stringify(view, null, 2);
+    lastStackSignature = signature;
+}
+
+function renderCode(context) {
+    const header = document.getElementById('codehdr');
+    const panel = document.getElementById('codeview');
+
+    if (!context || !context.ok || !Array.isArray(context.lines)) {
+        header.textContent = '—';
+        panel.replaceChildren();
+        lastCodeSignature = null;
+        return;
+    }
+
+    const signature = JSON.stringify([
+        context.file,
+        context.line,
+        context.start,
+        context.end,
+        context.lines
+    ]);
+
+    if (signature === lastCodeSignature && panel.childNodes.length > 0) {
+        return;
+    }
+
+    const gutter = document.createElement('div');
+    gutter.className = 'gutter';
+    const lines = document.createElement('div');
+    lines.className = 'lines';
+
+    for (const row of context.lines) {
+        const number = document.createElement('div');
+        number.className = row.cur ? 'cur-num' : '';
+        number.textContent = String(row.no);
+        gutter.appendChild(number);
+
+        const text = document.createElement('div');
+        text.className = 'line' + (row.cur ? ' cur' : '');
+
+        // Source text is HTML-escaped in read_source_context() on the backend.
+        const escapedSource = String(row.text === undefined ? '' : row.text);
+        text.innerHTML = escapedSource.trim() === '' ? '&nbsp;' : escapedSource;
+        lines.appendChild(text);
+    }
+
+    panel.replaceChildren(gutter, lines);
+    header.textContent = context.file + ':' + context.line +
+        ' (lines ' + context.start + '..' + context.end + ')';
+    lastCodeSignature = signature;
+}
+
+function escHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (character) {
+        return {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[character];
+    });
+}
+
+// Kept as a fallback: debugpanel.inspector.js replaces this renderer for
+// expandable DBGp properties when loaded after debugpanel.js.
+function renderVarNode(key, value, depth = 0) {
+    const container = document.createElement('div');
+
+    if (value === null || typeof value !== 'object') {
+        const line = document.createElement('div');
+        line.className = 'var-kv';
+        line.innerHTML = '<span class="var-key">' + escHtml(key) + '</span>' +
+            ': <span class="var-scalar">' + escHtml(value) + '</span>';
+        container.appendChild(line);
+        return container;
+    }
+
+    if (!('__type' in value)) {
+        const line = document.createElement('div');
+        line.className = 'var-kv';
+        line.innerHTML = '<span class="var-key">' + escHtml(key) + '</span>' +
+            ': <span class="var-scalar">' + escHtml(JSON.stringify(value)) + '</span>';
+        container.appendChild(line);
+        return container;
+    }
+
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    const type = String(value.__type || 'array');
+    const label = Object.prototype.hasOwnProperty.call(value, '__summary')
+        ? String(value.__summary)
+        : type + (value.__children ? '(' + Object.keys(value.__children).length + ')' : '()');
+
+    summary.innerHTML = '<span class="var-key">' + escHtml(key) + '</span>' +
+        ': <span class="var-type">' + escHtml(type) + '</span> ' +
+        (value.__children ? '' : '<span class="var-summary">' + escHtml(label) + '</span>');
+    details.appendChild(summary);
+
+    if (value.__children) {
+        for (const childKey of Object.keys(value.__children)) {
+            details.appendChild(renderVarNode(childKey, value.__children[childKey], depth + 1));
+        }
+    } else if (value.__summary) {
+        const line = document.createElement('div');
+        line.className = 'var-summary';
+        line.textContent = String(value.__summary);
+        details.appendChild(line);
+    }
+
+    container.appendChild(details);
+    return container;
+}
+
+function renderVarTree(element, data, generation) {
+    if (!data || typeof data !== 'object') {
+        element.textContent = '—';
+        element.__lastSig = null;
+        return;
+    }
+
+    // Every captured pause has its own generation. Using it avoids recursively
+    // sorting/stringifying potentially huge trees at every 5s poll.
+    const signature = Number.isInteger(generation)
+        ? 'generation:' + generation
+        : 'legacy:' + JSON.stringify(data);
+
+    if (element.__lastSig === signature && element.childNodes.length > 0) {
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const names = Object.keys(data).sort();
+
+    if (names.length === 0) {
+        const empty = document.createElement('span');
+        empty.textContent = '—';
+        fragment.appendChild(empty);
+    } else {
+        for (const name of names) {
+            fragment.appendChild(window.renderVarNode(name, data[name], 0));
+        }
+    }
+
+    // Set the cache only after a successful, complete DOM replacement.
+    element.replaceChildren(fragment);
+    element.__lastSig = signature;
+}
+
+async function executeDebuggerCommand(path) {
+    beginDebuggerAction();
+
+    try {
+        await api(path);
+    } catch (error) {
+        console.error('Debugger command failed:', error);
+        document.getElementById('status').textContent = 'error: ' + error.message;
+    }
+
+    await refresh();
+}
+
+async function setBreakpoint(event) {
     event.preventDefault();
 
     const form = new FormData(event.target);
@@ -110,250 +409,110 @@ document.getElementById('bpForm').onsubmit = async (event) => {
     message.textContent = '';
 
     try {
-        const response = await fetch('/dbg/api/bp/set?' + params.toString(), {
-            cache: 'no-store'
-        });
-        const result = await response.json();
+        const result = await api('/dbg/api/bp/set?' + params.toString());
 
-        if (!response.ok || !result.ok) {
+        if (!result.ok) {
             throw new Error(result.error || 'Breakpoint was not saved');
         }
 
         if (result.error) {
             message.textContent = 'Xdebug: ' + result.error;
         } else {
-            message.textContent = result.condition ? 'Conditional breakpoint saved.' : 'Breakpoint saved.';
+            message.textContent = result.condition
+                ? 'Conditional breakpoint saved'
+                : 'Breakpoint saved';
         }
 
         await refresh();
     } catch (error) {
-        message.textContent = 'Ошибка: ' + error.message;
+        message.textContent = 'Error: ' + error.message;
     }
-};
-document.getElementById('btnList').onclick = () => api('/dbg/api/bp/list').then(x => alert(JSON.stringify(x, null, 2)));
-document.getElementById('btnClear').onclick = () => api('/dbg/api/bp/clear').then(refresh);
-
-document.getElementById('btnCont').onclick = () => api('/dbg/api/run').then(refresh);
-document.getElementById('btnStepOver').onclick = () => api('/dbg/api/step_over').then(refresh);
-document.getElementById('btnStepInto').onclick = () => api('/dbg/api/step_into').then(refresh);
-document.getElementById('btnStepOut').onclick = () => api('/dbg/api/step_out').then(refresh);
-
-setInterval(refresh, 5000);
-refresh();
-
-document.getElementById('btnKill').onclick = async () => {
-    try {
-        await fetch('/dbg/api/kill', {cache: 'no-store'});
-    } catch (e) {
-    }
-    setTimeout(refresh, 100);
-};
-
-document.getElementById('btnRestart').onclick = async () => {
-    try {
-        await fetch('/dbg/?restart=1', {cache: 'no-store'});
-    } catch (e) {
-    }
-    setTimeout(window.location.reload, 500);
-};
-
-let __lastStackSig = null;
-
-function renderStack(st) {
-    const el = document.getElementById('stack-body');
-    const view = (() => {
-        if (!st || typeof st !== 'object') {
-            return st;
-        }
-
-        const v = {
-            status: st.status,
-            frames: Array.isArray(st.frames) ? st.frames.slice() : undefined,
-            source: st.source
-        };
-
-        if (Array.isArray(v.frames)) {
-            v.frames.sort((a, b) => (a.level | 0) - (b.level | 0));
-        }
-
-        return v;
-    })();
-
-    const sig = stableSig(view);
-    if (sig === __lastStackSig) {
-        return;
-    }
-    __lastStackSig = sig;
-
-    el.textContent = JSON.stringify(view, null, 2);
 }
 
-let __lastRenderCodeSig = null;
+function initializeDebugPanel() {
+    updateToggleUI();
 
-function renderCode(ctx) {
-    const hdr = document.getElementById('codehdr');
-    const view = document.getElementById('codeview');
-    if (!ctx || !ctx.ok) {
-        if (hdr.textContent !== '—') {
-            hdr.textContent = '—';
+    document.getElementById('bpForm').addEventListener('submit', setBreakpoint);
+
+    document.getElementById('btnList').addEventListener('click', async function () {
+        try {
+            const list = await api('/dbg/api/bp/list');
+            alert(JSON.stringify(list, null, 2));
+        } catch (error) {
+            console.error(error);
         }
-        view.innerHTML = '';
-        return;
-    }
-
-    const sig = ctx.file + ':' + ctx.line + '|' + ctx.start + '..' + ctx.end + '|' +
-        ctx.lines
-            .map(l => `${l.no}:${l.cur ? '*' : ''}:${l.text}`)
-            .join('\n');
-    if (sig === __lastRenderCodeSig) {
-        return;
-    }
-    __lastRenderCodeSig = sig;
-    hdr.textContent = ctx.file + ':' + ctx.line + ' (lines ' + ctx.start + '..' + ctx.end + ')';
-
-    const gutter = document.createElement('div');
-    gutter.className = 'gutter';
-    const lines = document.createElement('div');
-    lines.className = 'lines';
-
-    ctx.lines.forEach(row => {
-        const n = document.createElement('div');
-        n.className = row.cur ? 'cur-num' : '';
-        n.textContent = row.no;
-        gutter.appendChild(n);
-
-        const l = document.createElement('div');
-        l.className = 'line' + (row.cur ? ' cur' : '');
-        l.innerHTML = row.text.trim() === "" ? "&nbsp;" : row.text;
-        lines.appendChild(l);
     });
 
-    view.innerHTML = '';
-    view.appendChild(gutter);
-    view.appendChild(lines);
-}
-
-function escHtml(s) {
-    return s.replace(/[&<>"']/g, m => ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;'
-    }[m]));
-}
-
-function renderVarNode(key, val, depth = 0) {
-    const container = document.createElement('div');
-
-    if (val === null || typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
-        const line = document.createElement('div');
-        line.className = 'var-kv';
-        line.innerHTML =
-            '<span class="var-key">' + escHtml(String(key)) + '</span>' +
-            ': <span class="var-scalar">' + escHtml(String(val)) + '</span>';
-        container.appendChild(line);
-        return container;
-    }
-
-    const isTree = val && typeof val === 'object' && ('__type' in val);
-    if (!isTree) {
-        const line = document.createElement('div');
-        line.className = 'var-kv';
-        line.innerHTML =
-            '<span class="var-key">' + escHtml(String(key)) + '</span>' +
-            ': <span class="var-scalar">' + escHtml(JSON.stringify(val)) + '</span>';
-        container.appendChild(line);
-        return container;
-    }
-
-    const type = String(val.__type || 'array');
-    const summary = ('__summary' in val) ? String(val.__summary) : (type + (val.__children ? '(' + Object.keys(val.__children).length + ')' : '()'));
-
-    const det = document.createElement('details');
-    det.open = false;
-    const sum = document.createElement('summary');
-    sum.innerHTML =
-        '<span class="var-key">' + escHtml(String(key)) + '</span>' +
-        ': <span class="var-type">' + escHtml(type) + '</span> ' +
-        (val.__children ? '' : '<span class="var-summary">' + escHtml(summary) + '</span>');
-    det.appendChild(sum);
-
-    if (val.__children) {
-        const keys = Object.keys(val.__children);
-        for (let i = 0; i < keys.length; i++) {
-            const k = keys[i];
-            const child = renderVarNode(k, val.__children[k], depth + 1);
-            det.appendChild(child);
+    document.getElementById('btnClear').addEventListener('click', async function () {
+        try {
+            await api('/dbg/api/bp/clear');
+            await refresh();
+        } catch (error) {
+            console.error(error);
         }
-    } else if (val.__summary) {
-        const line = document.createElement('div');
-        line.className = 'var-summary';
-        line.textContent = val.__summary;
-        det.appendChild(line);
-    }
-
-    container.appendChild(det);
-    return container;
-}
-
-function renderVarTree(rootEl, dataObj) {
-    if (!dataObj || typeof dataObj !== 'object') {
-        if (rootEl.__lastSig !== 'null') {
-            rootEl.className = 'var-tree';
-            rootEl.textContent = '—';
-            rootEl.__lastSig = 'null';
-        }
-        return;
-    }
-
-    const sig = stableSig(dataObj);
-    if (rootEl.__lastSig === sig) {
-        return;
-    }
-    rootEl.__lastSig = sig;
-
-    rootEl.className = 'var-tree';
-    const frag = document.createDocumentFragment();
-
-    const names = Object.keys(dataObj).sort();
-    for (let i = 0; i < names.length; i++) {
-        const k = names[i];
-        frag.appendChild(renderVarNode(k, dataObj[k], 0));
-    }
-    rootEl.replaceChildren(frag);
-}
-
-function stableSig(obj) {
-    function norm(x) {
-        if (x === null || typeof x !== 'object') {
-            return x;
-        }
-        if (Array.isArray(x)) {
-            return x.map(norm);
-        }
-        const keys = Object.keys(x).sort();
-        const y = {};
-        for (let k of keys) {
-            y[k] = norm(x[k]);
-        }
-        return y;
-    }
-
-    try {
-        return JSON.stringify(norm(obj));
-    } catch {
-        return String(obj);
-    }
-}
-
-window.addEventListener("load", function () {
-    let setBpBtn = document.getElementById("set-bp");
-    setBpBtn.addEventListener("click", function () {
-        window.localStorage.setItem('php_debug_bp', document.getElementById('bp-filename').value);
     });
 
-    if (window.localStorage.getItem('php_debug_bp')) {
-        document.getElementById('bp-filename').value = window.localStorage.getItem('php_debug_bp');
+    const buttons = {
+        btnCont: '/dbg/api/run',
+        btnStepOver: '/dbg/api/step_over',
+        btnStepInto: '/dbg/api/step_into',
+        btnStepOut: '/dbg/api/step_out'
+    };
+
+    for (const id of Object.keys(buttons)) {
+        document.getElementById(id).addEventListener('click', function () {
+            executeDebuggerCommand(buttons[id]);
+        });
     }
-});
+
+    document.getElementById('btnKill').addEventListener('click', async function () {
+        beginDebuggerAction();
+
+        try {
+            await api('/dbg/api/kill');
+        } catch (error) {
+            console.error(error);
+        }
+
+        await refresh();
+    });
+
+    document.getElementById('btnRestart').addEventListener('click', async function () {
+        beginDebuggerAction();
+
+        try {
+            await fetch('/dbg/?restart=1', {
+                cache: 'no-store'
+            });
+        } catch (error) {
+            // The expected restart closes the server socket before replying.
+        }
+
+        setTimeout(function () {
+            window.location.reload();
+        }, 2000);
+    });
+
+    const filename = document.getElementById('bp-filename');
+    const savedFilename = window.localStorage.getItem('php_debug_bp');
+
+    if (savedFilename) {
+        filename.value = savedFilename;
+    }
+
+    document.getElementById('set-bp').addEventListener('click', function () {
+        window.localStorage.setItem('php_debug_bp', filename.value);
+    });
+
+    // Start only after both scripts have been evaluated.
+    refresh();
+    setInterval(refresh, 5000);
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeDebugPanel, {
+        once: true
+    });
+} else {
+    initializeDebugPanel();
+}
